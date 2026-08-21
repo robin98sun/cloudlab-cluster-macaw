@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+topology.json
+manifest.xml
+verify-results.json
+results/

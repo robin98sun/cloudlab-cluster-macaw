@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Install the Istio control plane on ctl1 and prepare a meshed namespace.
+# Runs in the background from bootstrap.sh, or by hand via `make istio`.
+#
+# Idempotent: istioctl install converges, and the namespace/label steps use
+# apply semantics. Safe to re-run after a partial failure.
+set -euo pipefail
+
+ISTIO_VERSION="${1:-1.31.0-rc.0}"
+NS="${TESTBED_NS:-testbed}"
+SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -H"
+KUBECTL="/usr/local/bin/k3s kubectl"
+
+echo "=== istio install $ISTIO_VERSION at $(date -Is) ==="
+
+if ! command -v istioctl >/dev/null 2>&1; then
+    echo "istioctl missing; downloading $ISTIO_VERSION"
+    cd /tmp
+    curl -sfL https://istio.io/downloadIstio | \
+        ISTIO_VERSION="$ISTIO_VERSION" sh -
+    $SUDO install -m 0755 "/tmp/istio-$ISTIO_VERSION/bin/istioctl" \
+        /usr/local/bin/istioctl
+fi
+
+echo "istioctl: $(istioctl version --remote=false 2>/dev/null || echo unknown)"
+
+# Wait for the apiserver rather than assuming it is up: this script may start
+# seconds after k3s was told to restart.
+for _ in $(seq 1 60); do
+    $SUDO $KUBECTL get --raw /readyz >/dev/null 2>&1 && break
+    sleep 5
+done
+
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+# The default profile is the right starting point for a sidecar mesh: an
+# ingress gateway plus istiod, no ambient components. Retried, because image
+# pulls on a fresh node can lose a race with the container runtime.
+ok=0
+for attempt in 1 2 3; do
+    if $SUDO -E istioctl install --set profile=default -y; then ok=1; break; fi
+    echo "istioctl install attempt $attempt failed; retrying in 30s"
+    sleep 30
+done
+[ "$ok" -eq 1 ] || { echo "ERROR: istioctl install failed three times"; exit 1; }
+
+$SUDO $KUBECTL create namespace "$NS" --dry-run=client -o yaml | \
+    $SUDO $KUBECTL apply -f -
+$SUDO $KUBECTL label namespace "$NS" istio-injection=enabled --overwrite
+
+echo "waiting for istiod"
+$SUDO $KUBECTL -n istio-system rollout status deploy/istiod --timeout=300s || \
+    echo "WARN: istiod rollout did not report ready in time"
+
+echo "=== istio install complete at $(date -Is) ==="
+$SUDO $KUBECTL -n istio-system get pods

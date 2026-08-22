@@ -36,11 +36,23 @@ done
 export KUBECONFIG=/etc/kubernetes/admin.conf
 
 # The default profile is the right starting point for a sidecar mesh: an
-# ingress gateway plus istiod, no ambient components. Retried, because image
-# pulls on a fresh node can lose a race with the container runtime.
+# ingress gateway plus istiod, no ambient components.
+#
+# ENABLE_NATIVE_SIDECARS makes istiod inject the proxy as a native sidecar --
+# an initContainer with restartPolicy: Always -- instead of an ordinary
+# container. That is what guarantees the proxy starts before the application
+# containers and stops after them. Without it the application can serve its
+# first request before the proxy is ready, and can lose its last responses on
+# shutdown. Kubernetes has supported this since 1.29; Istio does not enable
+# it by default on every version, so it is set explicitly rather than left to
+# whatever the combination happens to default to.
+#
+# Retried, because image pulls on a fresh node can lose a race with the
+# container runtime.
 ok=0
 for attempt in 1 2 3; do
-    if $SUDO_E istioctl install --set profile=default -y; then ok=1; break; fi
+    if $SUDO_E istioctl install --set profile=default \
+            --set values.pilot.env.ENABLE_NATIVE_SIDECARS=true -y; then ok=1; break; fi
     echo "istioctl install attempt $attempt failed; retrying in 30s"
     sleep 30
 done

@@ -15,7 +15,7 @@ Checks:
     C05 cgroup v2 unified hierarchy
     C06 clocks synchronised (each node's own NTP offset)
     C07 Istio control plane healthy
-    C08 sidecar injection produces a two-container pod
+    C08 sidecar injection produces a native-sidecar proxy
     C09 Envoy supports dynamic-module extensions
     C10 experiment LAN reachability matches the address plan
 """
@@ -168,20 +168,22 @@ def c07_istio(topo, ctl):
 
 
 def c08_injection(topo, ctl):
-    """A meshed namespace must produce a pod carrying istio-proxy.
+    """A meshed namespace must produce a pod carrying istio-proxy, and the
+    proxy must be a *native sidecar*.
 
-    Where the proxy lands depends on the Istio version. Modern Istio injects
-    it as a *native sidecar* -- an initContainer with restartPolicy: Always
-    (Kubernetes 1.29+) -- rather than as an ordinary container. Checking only
-    .spec.containers reports a false failure against those versions, so both
-    lists are examined and the form found is reported.
+    Native means an initContainer with restartPolicy: Always (Kubernetes
+    1.29+), which is what guarantees the proxy starts before the application
+    containers and stops after them. Injected as an ordinary container it
+    still works, but that ordering is gone -- the application can serve
+    before the proxy is ready. The profile sets ENABLE_NATIVE_SIDECARS, so
+    the ordinary form here means the setting did not take effect.
     """
     name = "inject-probe-%d" % int(time.time())
     create = ("%s -n %s run %s --image=registry.k8s.io/pause:3.9 "
-              "--restart=Never >/dev/null 2>&1" % (KUBECTL, NS, name))
+              "--restart=Never 2>&1" % (KUBECTL, NS, name))
     rc, out = sh(ctl, create)
     if rc != 0:
-        return False, "could not create probe pod: %s" % out[:120]
+        return False, "could not create probe pod: %s" % out[:160]
     try:
         regular = side = ""
         for _ in range(30):
@@ -195,9 +197,16 @@ def c08_injection(topo, ctl):
                 break
             time.sleep(2)
         if "istio-proxy" in side:
-            return True, "injected as a native sidecar (initContainers: %s)" % side
+            rc, policy = sh(ctl, "%s -n %s get pod %s -o jsonpath="
+                                 "'{.spec.initContainers[?(@.name==\"istio-proxy\")]"
+                                 ".restartPolicy}'" % (KUBECTL, NS, name))
+            ok = policy.strip() == "Always"
+            return ok, ("native sidecar (initContainers: %s)" % side) if ok \
+                else "in initContainers but restartPolicy=%r, not Always" % policy
         if "istio-proxy" in regular:
-            return True, "injected as a regular container (%s)" % regular
+            return False, ("injected as an ordinary container (%s): startup "
+                           "ordering is not guaranteed. Check "
+                           "ENABLE_NATIVE_SIDECARS on istiod." % regular)
         return False, ("no istio-proxy; containers=[%s] initContainers=[%s]"
                        % (regular or "-", side or "-"))
     finally:

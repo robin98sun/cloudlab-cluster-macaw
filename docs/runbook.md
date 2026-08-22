@@ -62,7 +62,7 @@ make verify
 | C05 | cgroup v2 unified | wrong base image — Ubuntu 22.04 defaults to unified |
 | C06 | clocks synchronised | chrony did not start; check `bootstrap.log` |
 | C07 | Istio control plane | the install may still be running; see §4 |
-| C08 | sidecar injection | the namespace label is missing, or istiod is unhealthy — see §5.1 |
+| C08 | native-sidecar injection | namespace label missing, istiod unhealthy, or `ENABLE_NATIVE_SIDECARS` not set — see §5 |
 | C09 | Envoy dynamic modules | see §5.1 |
 | C10 | experiment LANs | a worker is missing an interface — check the manifest |
 
@@ -86,19 +86,25 @@ uncheck `install_istio` when instantiating.
 
 ## 5. The injected proxy
 
-Modern Istio injects the proxy as a **native sidecar**: an initContainer with
+The proxy is injected as a **native sidecar**: an initContainer with
 `restartPolicy: Always`, a Kubernetes 1.29+ feature, rather than as an
-ordinary container. Verified on Istio 1.31.0-rc.0, where a meshed pod carries
-`istio-init` and `istio-proxy` in `.spec.initContainers` and shows `2/2`
-ready.
+ordinary container.
 
-This matters when inspecting or extending the proxy. `kubectl get pod -o
-jsonpath='{.spec.containers[*].name}'` will not list it; check
-`.spec.initContainers` too. Native sidecars also start before the
-application's own containers and stop after them, so anything the proxy must
-establish is in place before the application serves traffic.
+**This is pinned, not inherited.** Istio does not enable it by default on
+every version pairing — on Kubernetes 1.30 the same Istio 1.31.0-rc.0 injects
+an ordinary container unless told otherwise. The install therefore sets
+`values.pilot.env.ENABLE_NATIVE_SIDECARS=true` explicitly, and C08 fails if
+the result is an ordinary container.
 
-C08 accepts either form and reports which one it found.
+Why it matters: a native sidecar starts **before** the application's
+containers and stops **after** them. An ordinary container has no such
+ordering, so the application can serve its first request before the proxy is
+ready, and lose its last responses on shutdown. Anything the proxy must
+establish at startup depends on this.
+
+When inspecting the proxy, note that `kubectl get pod -o
+jsonpath='{.spec.containers[*].name}'` will **not** list it. Check
+`.spec.initContainers`.
 
 ## 5.1 Envoy dynamic modules
 

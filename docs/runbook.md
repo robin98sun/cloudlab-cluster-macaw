@@ -56,7 +56,8 @@ make verify
 |---|---|---|
 | C01 | every node Ready | agents may still be joining; wait and re-run |
 | C02 | one hardware type | a mixed allocation invalidates comparisons — reallocate |
-| C03 | containerd NRI enabled | run `make nri-restart` |
+| C03 | containerd NRI enabled | run `make containerd-reconfigure` |
+| C03b | systemd cgroup driver | as above; then restart kubelet |
 | C04 | BPF toolchain and BTF | the bake layer's tool install failed; see §6 |
 | C05 | cgroup v2 unified | wrong base image — Ubuntu 22.04 defaults to unified |
 | C06 | clocks synchronised | chrony did not start; check `bootstrap.log` |
@@ -142,8 +143,8 @@ Two further notes:
 
 ## 6. Golden images
 
-The first boot from the base image installs packages, the k3s binary,
-`istioctl`, the BPF toolchain, and prefetched container images. That is the
+The first boot from the base image installs packages, containerd,
+kubeadm/kubelet/kubectl, `istioctl`, and the BPF toolchain. That is the
 slow part. Baking it into a disk image makes redeploys fast.
 
 ```bash
@@ -160,35 +161,46 @@ change, then rebake. A node whose `/etc/testbed-image-version` does not match
 rebuilds the layer automatically, so a stale image degrades to a slow boot
 rather than a wrong one.
 
-## 7. NRI
+## 7. containerd
 
-NRI is enabled by writing a k3s containerd **config template**, not by
-editing generated config.
+Three settings matter, and all three are applied through a **drop-in**, not
+by editing generated config:
 
-This matters. The common recipe rewrites the generated `config.toml` with
-`sed`. The generated file's TOML quoting style changes between containerd
-versions, so a pattern written for one style silently matches nothing on the
-next — leaving a cluster that looks configured but has NRI switched off, with
-no error anywhere. A template avoids the problem entirely, because k3s
-composes the file itself.
+- `SystemdCgroup = true` — required by Kubernetes on a systemd host, and it
+  produces the `kubepods.slice/...` layout that cgroup and PSI readers
+  expect. The cgroupfs driver produces `kubepods/...` and they see nothing.
+- **NRI enabled** — plugins in `/opt/nri/plugins`, their config in
+  `/etc/nri/conf.d`, socket at `/var/run/nri/nri.sock`.
+- **data root on the large disk** — the CloudLab root filesystem is about
+  64 GB, small enough that image churn causes DiskPressure evictions.
 
-Plugins go in `/opt/nri/plugins`, their configuration in `/etc/nri/conf.d`,
-and the socket appears at `/var/run/nri/nri.sock`. After changing the
-template, restart the runtime:
+The common recipe rewrites the generated `config.toml` with
+`sed s/SystemdCgroup = false/SystemdCgroup = true/`. That depends on
+generated text, and containerd's defaults change between versions — 2.x
+renamed the CRI plugin and moved to config version 3. A pattern written for
+one release silently matches nothing on the next, leaving a cluster that
+looks configured and is not.
+
+Instead the script generates the defaults, prepends one `imports` line, and
+puts every override in its own file. Nothing pattern-matches generated
+content. To re-apply:
 
 ```bash
-make nri-restart
+make containerd-reconfigure
 ```
 
 ## 8. Reaching the cluster
 
-`kubectl` works on every node, including agents, using a local admin
-kubeconfig written at bootstrap:
+On `ctl1`:
 
 ```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+export KUBECONFIG=/etc/kubernetes/admin.conf
 ```
 
-This uses a static token shared across the private testbed. It is a
-deliberate trade-off for a disposable cluster on an isolated network, and is
-not a pattern for anything internet-facing.
+The bootstrap also copies it to `~/.kube/config` for the login account and
+for `ubuntu`.
+
+Cluster formation uses a fixed bootstrap token and certificate key so every
+node joins with no coordination or file distribution. That is a deliberate
+trade-off for a disposable cluster on an isolated control network, and is not
+a pattern for anything internet-facing.

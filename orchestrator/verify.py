@@ -10,6 +10,7 @@ Checks:
     C01 every node Ready
     C02 one hardware type across the allocation
     C03 containerd NRI enabled on every node
+    C03b kubelet uses the systemd cgroup driver
     C04 BPF toolchain and kernel BTF present
     C05 cgroup v2 unified hierarchy
     C06 clocks synchronised (each node's own NTP offset)
@@ -27,7 +28,7 @@ import sys
 import time
 
 NS = "testbed"
-KUBECTL = "sudo /usr/local/bin/k3s kubectl"
+KUBECTL = "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl"
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
        "-o", "StrictHostKeyChecking=accept-new"]
 
@@ -73,15 +74,30 @@ def c02_homogeneous(topo, ctl):
 
 
 def c03_nri(topo, ctl):
+    """NRI must be live, and the drop-in must be what enabled it."""
     bad = []
     for n in topo["nodes"]:
-        rc, out = sh(n, "test -e /var/run/nri/nri.sock && echo sock; "
-                        "ls /var/lib/rancher/k3s/agent/etc/containerd/ 2>/dev/null")
-        has_sock = "sock" in out
-        has_tmpl = "toml.tmpl" in out
-        if not (has_sock and has_tmpl):
-            bad.append("%s(sock=%s,tmpl=%s)" % (n["name"], has_sock, has_tmpl))
-    return not bad, "all nodes" if not bad else "missing on " + ", ".join(bad)
+        rc, out = sh(n, "test -S /var/run/nri/nri.sock && echo sock; "
+                        "grep -l 'io.containerd.nri' /etc/containerd/conf.d/*.toml "
+                        "2>/dev/null && echo dropin; "
+                        "grep -q '^imports' /etc/containerd/config.toml && echo imports")
+        missing = [k for k in ("sock", "dropin", "imports") if k not in out]
+        if missing:
+            bad.append("%s:%s" % (n["name"], "+".join(missing)))
+    return not bad, "all nodes" if not bad else "missing " + ", ".join(bad)
+
+
+def c03b_cgroup_driver(topo, ctl):
+    """The systemd driver produces kubepods.slice/...; cgroupfs produces
+    kubepods/..., and every cgroup and PSI reader then sees nothing."""
+    bad = []
+    for n in topo["nodes"]:
+        rc, out = sh(n, "test -d /sys/fs/cgroup/kubepods.slice && echo systemd || "
+                        "(test -d /sys/fs/cgroup/kubepods && echo cgroupfs)")
+        if "systemd" not in out:
+            bad.append("%s(%s)" % (n["name"], out.strip() or "no kubepods yet"))
+    return not bad, "kubepods.slice on all nodes" if not bad \
+        else "wrong layout: " + ", ".join(bad)
 
 
 def c04_bpf(topo, ctl):
@@ -237,6 +253,7 @@ CHECKS = [
     ("C01", "nodes Ready", c01_nodes_ready),
     ("C02", "homogeneous hardware", c02_homogeneous),
     ("C03", "containerd NRI", c03_nri),
+    ("C03b", "systemd cgroup driver", c03b_cgroup_driver),
     ("C04", "BPF toolchain + BTF", c04_bpf),
     ("C05", "cgroup v2 unified", c05_cgroup_v2),
     ("C06", "clock sync", c06_clock),

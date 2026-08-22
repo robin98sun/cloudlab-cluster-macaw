@@ -9,7 +9,7 @@ set -euo pipefail
 ISTIO_VERSION="${1:-1.31.0-rc.0}"
 NS="${TESTBED_NS:-testbed}"
 SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -H"
-KUBECTL="/usr/local/bin/k3s kubectl"
+KUBECTL="kubectl"
 
 echo "=== istio install $ISTIO_VERSION at $(date -Is) ==="
 
@@ -24,14 +24,15 @@ fi
 
 echo "istioctl: $(istioctl version --remote=false 2>/dev/null || echo unknown)"
 
-# Wait for the apiserver rather than assuming it is up: this script may start
-# seconds after k3s was told to restart.
+# Wait for the apiserver rather than assuming it is up: this script starts
+# moments after kubeadm init returns.
+export KUBECONFIG=/etc/kubernetes/admin.conf
 for _ in $(seq 1 60); do
-    $SUDO $KUBECTL get --raw /readyz >/dev/null 2>&1 && break
+    $SUDO -E $KUBECTL get --raw /readyz >/dev/null 2>&1 && break
     sleep 5
 done
 
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+export KUBECONFIG=/etc/kubernetes/admin.conf
 
 # The default profile is the right starting point for a sidecar mesh: an
 # ingress gateway plus istiod, no ambient components. Retried, because image
@@ -44,13 +45,13 @@ for attempt in 1 2 3; do
 done
 [ "$ok" -eq 1 ] || { echo "ERROR: istioctl install failed three times"; exit 1; }
 
-$SUDO $KUBECTL create namespace "$NS" --dry-run=client -o yaml | \
-    $SUDO $KUBECTL apply -f -
-$SUDO $KUBECTL label namespace "$NS" istio-injection=enabled --overwrite
+$SUDO -E $KUBECTL create namespace "$NS" --dry-run=client -o yaml | \
+    $SUDO -E $KUBECTL apply -f -
+$SUDO -E $KUBECTL label namespace "$NS" istio-injection=enabled --overwrite
 
 echo "waiting for istiod"
-$SUDO $KUBECTL -n istio-system rollout status deploy/istiod --timeout=300s || \
+$SUDO -E $KUBECTL -n istio-system rollout status deploy/istiod --timeout=300s || \
     echo "WARN: istiod rollout did not report ready in time"
 
 echo "=== istio install complete at $(date -Is) ==="
-$SUDO $KUBECTL -n istio-system get pods
+$SUDO -E $KUBECTL -n istio-system get pods

@@ -1,11 +1,11 @@
-"""Service-mesh testbed on CloudLab bare metal (k3s + Istio).
+"""Service-mesh testbed on CloudLab bare metal (Kubernetes + Istio).
 
 Project-neutral infrastructure. Namespaces, labels and paths use the generic
 name "testbed", so the same profile serves any system under test.
 
 Physical hosts (one hardware type per comparison series, default c6525-25g):
 
-    ctl1    k3s control plane, Istio control plane, monitoring   client LAN
+    ctl1    Kubernetes control plane, Istio, monitoring          client LAN
     wk<j>   worker hosts: meshed workloads and per-node agents   client + mesh
                                                                  LANs
     lg<i>   optional dedicated load-generator hosts              client LAN
@@ -13,8 +13,11 @@ Physical hosts (one hardware type per comparison series, default c6525-25g):
 Every worker node is prepared with:
 
   * cgroup v2 unified hierarchy
-  * containerd with NRI enabled, configured through a k3s config template
-    rather than by editing generated config (see cloudlab/containerd-nri.sh)
+  * upstream Kubernetes installed with kubeadm, Calico CNI, one pinned
+    minor series with the packages held
+  * containerd with NRI enabled and the systemd cgroup driver, configured
+    through a drop-in rather than by editing generated config
+    (see cloudlab/containerd-config.sh)
   * a BPF toolchain and kernel BTF, for CPU and kernel telemetry
   * an Istio sidecar-injection-ready namespace
 
@@ -39,7 +42,7 @@ works. See docs/runbook.md.
 
 Networks: client 10.10.1.0/24, mesh 10.10.2.0/24. Kubernetes and Istio
 control traffic ride CloudLab's control network, so the experiment LANs stay
-clean.
+clean. Pod networking is Calico over 192.168.0.0/16.
 
 Address plan: ctl1 10.10.1.10; lg<i> 10.10.1.(10+i); wk<j> 10.10.1.(20+j)
 and 10.10.2.(20+j).

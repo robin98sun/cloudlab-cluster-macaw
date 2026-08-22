@@ -1,4 +1,4 @@
-"""Build topology.json for the k3s + Istio layout.
+"""Build topology.json for the Kubernetes + Istio layout.
 
 Physical hosts carry roles ctl|wk|lg.
 

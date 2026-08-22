@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-IMAGE_LAYER=2          # bump when the bake layer's contents change, then rebake
+IMAGE_LAYER=3          # bump when the bake layer's contents change, then rebake
 
 # Kubernetes minor series. Pinned and held so a later apt upgrade cannot move
 # the cluster underneath a run.
@@ -108,6 +108,41 @@ else
               /usr/local/bin/istioctl ) \
         || echo "WARN: istioctl download failed; 'make istio' can retry"
     fi
+
+    # Image cache. Every redeploy would otherwise pull calico + istio-proxy on
+    # every node from Docker Hub, whose rate limits refuse exactly the
+    # "instantiate, test, tear down, repeat" pattern this testbed lives by.
+    # Tarballs go on the SYSTEM disk (captured by "Create Disk Image"); the
+    # blockstore is blank on every re-instantiation, so caching there is a
+    # no-op across deployments. Imported into containerd in layer 2.
+    IMG_CACHE=/usr/local/share/testbed/images
+    $SUDO mkdir -p "$IMG_CACHE"
+    PREFETCH_IMAGES="$( (kubeadm config images list \
+            --kubernetes-version "$(kubeadm version -o short)" 2>/dev/null; \
+        echo "docker.io/calico/cni:$CALICO_VERSION"; \
+        echo "docker.io/calico/node:$CALICO_VERSION"; \
+        echo "docker.io/calico/kube-controllers:$CALICO_VERSION"; \
+        echo "docker.io/istio/pilot:$ISTIO_VERSION"; \
+        echo "docker.io/istio/proxyv2:$ISTIO_VERSION") | sort -u )"
+    # manifest.txt maps tarball -> image name; the boot layer reads it back.
+    # Reconstructing the name from the filename is not reliable (underscores
+    # are legal in image names), so it is recorded, not derived.
+    $SUDO rm -f "$IMG_CACHE/manifest.txt.new"
+    for img in $PREFETCH_IMAGES; do
+        tarname="$(echo "$img" | tr '/:' '__').tar"
+        echo "$tarname $img" | $SUDO tee -a "$IMG_CACHE/manifest.txt.new" >/dev/null
+        if $SUDO test -s "$IMG_CACHE/$tarname"; then
+            echo "cached: $img"
+            continue
+        fi
+        echo "prefetching $img"
+        $SUDO skopeo copy "docker://$img" \
+            "docker-archive:$IMG_CACHE/$tarname:$img" >/dev/null 2>&1 \
+            || { echo "WARN: prefetch failed for $img (will pull at run time)"; \
+                 $SUDO rm -f "$IMG_CACHE/$tarname"; }
+    done
+    $SUDO mv -f "$IMG_CACHE/manifest.txt.new" "$IMG_CACHE/manifest.txt"
+    echo "image cache: $($SUDO du -sh "$IMG_CACHE" 2>/dev/null | cut -f1) in $IMG_CACHE"
 
     echo "$IMAGE_LAYER" | $SUDO tee /etc/testbed-image-version >/dev/null
 fi
@@ -192,6 +227,26 @@ grep -q 'cosched-cloudlab' /etc/security/limits.conf 2>/dev/null || \
 
 # --- containerd -------------------------------------------------------------
 bash "$REPO/cloudlab/containerd-config.sh" "$SHARED/k8s_cache/containerd"
+
+# Import the baked image tarballs before kubeadm or the kubelet can trigger
+# a registry pull. The image store lives on the blockstore, which is blank
+# on a fresh instantiation -- the tarballs on the system disk are what
+# survive imaging. Idempotent: images already present are skipped.
+IMG_CACHE=/usr/local/share/testbed/images
+if [ -f "$IMG_CACHE/manifest.txt" ]; then
+    PRESENT="$($SUDO ctr -n k8s.io images ls -q 2>/dev/null || true)"
+    while read -r tarname ref; do
+        [ -n "$tarname" ] && [ -n "$ref" ] || continue
+        [ -s "$IMG_CACHE/$tarname" ] || continue
+        if echo "$PRESENT" | grep -qxF "$ref"; then
+            continue
+        fi
+        echo "importing $ref"
+        $SUDO ctr -n k8s.io images import "$IMG_CACHE/$tarname" >/dev/null \
+            || echo "WARN: import failed for $tarname"
+    done < "$IMG_CACHE/manifest.txt"
+    echo "containerd images: $($SUDO ctr -n k8s.io images ls -q 2>/dev/null | wc -l)"
+fi
 
 # Node IP and kubelet data directory.
 #

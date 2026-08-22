@@ -162,6 +162,15 @@ resulting URN as `GOLDEN_IMAGE` in `profile.py` and commit. Append `:N` to
 freeze a specific version, and do that inside the `submission` preset before
 tagging a release.
 
+The bake layer also prefetches every pinned container image — control
+plane, Calico, Istio — as tarballs under `/usr/local/share/testbed/images`.
+That directory is on the **system disk** deliberately: the blockstore is
+blank on every re-instantiation, so a cache there would not survive imaging.
+At boot the tarballs are imported into containerd before anything can
+trigger a registry pull. Without this, every redeploy pulls Calico and the
+Istio proxy on every node from Docker Hub, whose rate limits refuse exactly
+the instantiate-test-teardown pattern a testbed lives by.
+
 Bump `IMAGE_LAYER` in `bootstrap.sh` whenever the bake layer's contents
 change, then rebake. A node whose `/etc/testbed-image-version` does not match
 rebuilds the layer automatically, so a stale image degrades to a slow boot

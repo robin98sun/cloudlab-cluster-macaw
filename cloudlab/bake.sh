@@ -3,7 +3,9 @@
 # the CloudLab portal ("Create Disk Image" on this node), not here.
 #
 # Keeps:  packages, BPF toolchain, containerd, kubeadm/kubelet/kubectl,
-#         istioctl, /etc/testbed-image-version
+#         istioctl, the image-tarball cache (/usr/local/share/testbed/images,
+#         on the system disk precisely so imaging captures it),
+#         /etc/testbed-image-version
 # Wipes:  every trace of cluster identity and per-boot state, so the next
 #         boot forms a fresh cluster no matter which node this image lands on.
 set -euo pipefail

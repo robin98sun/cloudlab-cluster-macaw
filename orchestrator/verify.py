@@ -74,17 +74,23 @@ def c02_homogeneous(topo, ctl):
 
 
 def c03_nri(topo, ctl):
-    """NRI must be live, and the drop-in must be what enabled it."""
+    """NRI must be live, per containerd's own effective configuration.
+
+    Both probes need root. The socket directory is mode 0700, and containerd
+    config dump requires privilege -- an unprivileged check reports a working
+    node as broken.
+    """
     bad = []
     for n in topo["nodes"]:
-        rc, out = sh(n, "test -S /var/run/nri/nri.sock && echo sock; "
-                        "grep -l 'io.containerd.nri' /etc/containerd/conf.d/*.toml "
-                        "2>/dev/null && echo dropin; "
-                        "grep -q '^imports' /etc/containerd/config.toml && echo imports")
-        missing = [k for k in ("sock", "dropin", "imports") if k not in out]
+        rc, out = sh(n, "sudo test -S /var/run/nri/nri.sock && echo sock; "
+                        "sudo containerd config dump 2>/dev/null | "
+                        "awk '/io.containerd.nri.v1.nri/,/^$/' | "
+                        "grep -q 'disable = false' && echo enabled")
+        missing = [k for k in ("sock", "enabled") if k not in out]
         if missing:
             bad.append("%s:%s" % (n["name"], "+".join(missing)))
-    return not bad, "all nodes" if not bad else "missing " + ", ".join(bad)
+    return not bad, "socket live and enabled on all nodes" if not bad \
+        else "missing " + ", ".join(bad)
 
 
 def c03b_cgroup_driver(topo, ctl):

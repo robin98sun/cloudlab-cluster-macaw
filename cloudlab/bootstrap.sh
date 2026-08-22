@@ -39,7 +39,7 @@ POD_CIDR="${POD_CIDR:-192.168.0.0/16}"
 # file distribution or coordination. A private testbed on an isolated
 # control network; not a pattern for anything internet-facing.
 KUBE_TOKEN="ab1cd2.3ef4gh5ij6kl7mn8"
-CERT_KEY="6b1e4f92a7c3d05e8f1b2a4c6d8e0f13579bdf2468ace013579bdf2468ace0135"
+CERT_KEY="3191a54ae43f472b9c8460f2bca1838d7d18afcbb41f408eba50dc1083264c18"   # 32 bytes, hex; kubeadm rejects any other length
 
 REPO=/local/repository
 STATE=/local/testbed
@@ -118,23 +118,55 @@ $SUDO systemctl enable --now chrony >/dev/null 2>&1 || \
 $SUDO chronyc makestep >/dev/null 2>&1 || true
 
 # --- storage: the root filesystem is ~64 GB, too small for image churn ------
-$SUDO mkdir -p "$SHARED"
-if ! mountpoint -q "$SHARED"; then
-    ROOTDISK=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" 2>/dev/null || true)
-    DEV=$(lsblk -rno NAME,TYPE,FSTYPE,MOUNTPOINT | \
-          awk -v rd="$ROOTDISK" '($2=="disk") && $3=="" && $4=="" && $1!=rd {print $1}' | \
+# Returns non-zero rather than exiting: a disk problem must not take down
+# cluster formation. set -e is suspended inside a function used as a
+# condition, so every step checks its own result.
+setup_shared_storage() {
+    local rootdisk dev fstype
+    $SUDO mkdir -p "$SHARED"
+    if mountpoint -q "$SHARED"; then
+        echo "shared storage already mounted at $SHARED"
+        return 0
+    fi
+    rootdisk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" 2>/dev/null | head -1 || true)
+    dev=$(lsblk -rno NAME,TYPE,FSTYPE,MOUNTPOINT | \
+          awk -v rd="$rootdisk" '($2=="disk") && $3=="" && $4=="" && $1!=rd {print $1}' | \
           while read -r d; do
               echo "$(lsblk -bdno SIZE "/dev/$d" 2>/dev/null || echo 0) $d"
           done | sort -rn | head -1 | awk '{print $2}')
-    if [ -n "$DEV" ] && [ -b "/dev/$DEV" ]; then
-        blkid "/dev/$DEV" >/dev/null 2>&1 || $SUDO mkfs.ext4 -q -F "/dev/$DEV"
-        $SUDO mount "/dev/$DEV" "$SHARED"
-        grep -q " $SHARED " /etc/fstab || \
-            echo "/dev/$DEV $SHARED ext4 defaults,nofail 0 2" | $SUDO tee -a /etc/fstab >/dev/null
-        echo "shared storage: /dev/$DEV -> $SHARED"
-    else
-        echo "WARNING: no spare disk found; $SHARED is on the root filesystem"
+    if [ -z "$dev" ] || [ ! -b "/dev/$dev" ]; then
+        echo "no spare disk found"
+        return 1
     fi
+
+    # Probe as root. Unprivileged blkid cannot open the device and exits 0
+    # with no output, which reads as "filesystem present" and silently skips
+    # the mkfs below -- the mount then fails on a raw disk.
+    fstype=$($SUDO blkid -o value -s TYPE "/dev/$dev" 2>/dev/null || true)
+    case "$fstype" in
+        ext2|ext3|ext4|xfs)
+            echo "/dev/$dev already carries $fstype" ;;
+        *)
+            echo "formatting /dev/$dev (found ${fstype:-no filesystem})"
+            $SUDO mkfs.ext4 -q -F "/dev/$dev" || return 1 ;;
+    esac
+
+    if ! $SUDO mount "/dev/$dev" "$SHARED"; then
+        # A leftover signature blkid recognises but the kernel will not
+        # mount. Reformat once, then give up.
+        echo "mount failed; reformatting /dev/$dev and retrying"
+        $SUDO mkfs.ext4 -q -F "/dev/$dev" || return 1
+        $SUDO mount "/dev/$dev" "$SHARED" || return 1
+    fi
+    grep -q " $SHARED " /etc/fstab || \
+        echo "/dev/$dev $SHARED ext4 defaults,nofail 0 2" | $SUDO tee -a /etc/fstab >/dev/null
+    echo "shared storage: /dev/$dev -> $SHARED"
+    return 0
+}
+
+if ! setup_shared_storage; then
+    echo "WARNING: no shared storage; $SHARED stays on the root filesystem"
+    echo "         (about 64 GB). Expect DiskPressure under image churn."
 fi
 $SUDO chmod 0777 "$SHARED"
 $SUDO mkdir -p "$SHARED/k8s_cache/containerd" "$SHARED/k8s_cache/kubelet"
@@ -161,12 +193,33 @@ grep -q 'cosched-cloudlab' /etc/security/limits.conf 2>/dev/null || \
 # --- containerd -------------------------------------------------------------
 bash "$REPO/cloudlab/containerd-config.sh" "$SHARED/k8s_cache/containerd"
 
-# Kubelet data on the large disk too.
-$SUDO mkdir -p /etc/systemd/system/kubelet.service.d
-$SUDO tee /etc/systemd/system/kubelet.service.d/20-root-dir.conf >/dev/null <<KUBELET
-[Service]
-Environment="KUBELET_EXTRA_ARGS=--root-dir=$SHARED/k8s_cache/kubelet"
+# Node IP and kubelet data directory.
+#
+# --node-ip matters more than it looks. CloudLab nodes are multi-homed, and
+# an unpinned kubelet picks whichever interface it enumerates first: on this
+# hardware some nodes land on the client LAN and others on the mesh LAN. The
+# control plane then has no route to half the cluster, and everything that
+# depends on the API server reaching a pod -- admission webhooks above all --
+# times out with an error that names none of this.
+#
+# The default-route source address is the CloudLab control network, which
+# every node shares and which carries no measured traffic.
+NODE_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
+if [ -z "$NODE_IP" ]; then
+    echo "WARNING: could not determine the control-network address; kubelet will guess"
+else
+    echo "node IP: $NODE_IP"
+fi
+# These go in /etc/default/kubelet, not a systemd drop-in. kubeadm's unit
+# reads that path with EnvironmentFile=, and systemd applies EnvironmentFile
+# after every Environment= setting regardless of drop-in order -- so a
+# drop-in is silently overridden by the empty KUBELET_EXTRA_ARGS the package
+# ships there, with no error anywhere.
+$SUDO tee /etc/default/kubelet >/dev/null <<KUBELET
+KUBELET_EXTRA_ARGS=--root-dir=$SHARED/k8s_cache/kubelet${NODE_IP:+ --node-ip=$NODE_IP}
 KUBELET
+$SUDO rm -f /etc/systemd/system/kubelet.service.d/20-root-dir.conf \
+            /etc/systemd/system/kubelet.service.d/20-testbed.conf
 $SUDO systemctl daemon-reload
 
 python3 - "$ROLE" "$STATE/telemetry" <<'PYFACTS' | $SUDO tee "$STATE/facts.json" >/dev/null
@@ -200,10 +253,6 @@ print(json.dumps({
 }, indent=2))
 PYFACTS
 
-case "$ROLE" in
-    ctl|lg) $SUDO ip route del 10.10.2.0/24 2>/dev/null || true ;;
-esac
-
 # --- cluster formation ------------------------------------------------------
 # Resolve ctl1 from the CloudLab manifest: hostname -f can be stale during
 # early boot, and /etc/hosts maps bare "ctl1" to an experiment LAN. All
@@ -227,6 +276,10 @@ elif [ -n "${CTL_IP:-}" ]; then
 else
     SERVER_HOST="ctl1.$(hostname -f | cut -d. -f2-)"
 fi
+# CloudLab returns names like ctl1.<user>-NNNNN.<proj>-PG0.utah.cloudlab.us.
+# DNS is case-insensitive, but kubeadm validates against RFC-1123, which
+# requires lowercase -- an uppercase project suffix is rejected outright.
+SERVER_HOST="$(echo "$SERVER_HOST" | tr '[:upper:]' '[:lower:]')"
 ENDPOINT="${SERVER_HOST}:6443"
 echo "control plane endpoint: $ENDPOINT"
 
@@ -258,15 +311,23 @@ case "$ROLE" in
             $SUDO chown -R "$u" "$h/.kube" 2>/dev/null || true
         done
 
-        $SUDO -E kubectl apply -f \
-            "https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/calico.yaml" \
-            || echo "WARN: Calico apply failed; retry with 'make cni'"
+        if $SUDO_E kubectl apply -f \
+            "https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/calico.yaml"
+        then
+            # Default autodetection is first-found, which on a multi-homed
+            # node disagrees with --node-ip above. Follow the node IP.
+            $SUDO_E kubectl -n kube-system set env daemonset/calico-node \
+                IP_AUTODETECTION_METHOD=kubernetes-internal-ip >/dev/null \
+                || echo "WARN: could not pin Calico IP autodetection"
+        else
+            echo "WARN: Calico apply failed; retry with 'make cni'"
+        fi
 
         EXPECTED=$((1 + WK_HOSTS + LG_HOSTS))
         echo "waiting for $EXPECTED Ready nodes"
         READY=0
         for _ in $(seq 1 120); do
-            READY=$($SUDO -E kubectl get nodes --no-headers 2>/dev/null \
+            READY=$($SUDO_E kubectl get nodes --no-headers 2>/dev/null \
                     | awk '$2 == "Ready" {n++} END {print n+0}' || true)
             READY=${READY:-0}
             [ "$READY" -ge "$EXPECTED" ] && break

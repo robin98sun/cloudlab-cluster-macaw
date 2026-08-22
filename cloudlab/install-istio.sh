@@ -8,7 +8,8 @@ set -euo pipefail
 
 ISTIO_VERSION="${1:-1.31.0-rc.0}"
 NS="${TESTBED_NS:-testbed}"
-SUDO=""; [ "$(id -u)" -ne 0 ] && SUDO="sudo -H"
+SUDO=""; SUDO_E="env"
+if [ "$(id -u)" -ne 0 ]; then SUDO="sudo -H"; SUDO_E="sudo -H -E"; fi
 KUBECTL="kubectl"
 
 echo "=== istio install $ISTIO_VERSION at $(date -Is) ==="
@@ -28,7 +29,7 @@ echo "istioctl: $(istioctl version --remote=false 2>/dev/null || echo unknown)"
 # moments after kubeadm init returns.
 export KUBECONFIG=/etc/kubernetes/admin.conf
 for _ in $(seq 1 60); do
-    $SUDO -E $KUBECTL get --raw /readyz >/dev/null 2>&1 && break
+    $SUDO_E $KUBECTL get --raw /readyz >/dev/null 2>&1 && break
     sleep 5
 done
 
@@ -39,19 +40,19 @@ export KUBECONFIG=/etc/kubernetes/admin.conf
 # pulls on a fresh node can lose a race with the container runtime.
 ok=0
 for attempt in 1 2 3; do
-    if $SUDO -E istioctl install --set profile=default -y; then ok=1; break; fi
+    if $SUDO_E istioctl install --set profile=default -y; then ok=1; break; fi
     echo "istioctl install attempt $attempt failed; retrying in 30s"
     sleep 30
 done
 [ "$ok" -eq 1 ] || { echo "ERROR: istioctl install failed three times"; exit 1; }
 
-$SUDO -E $KUBECTL create namespace "$NS" --dry-run=client -o yaml | \
-    $SUDO -E $KUBECTL apply -f -
-$SUDO -E $KUBECTL label namespace "$NS" istio-injection=enabled --overwrite
+$SUDO_E $KUBECTL create namespace "$NS" --dry-run=client -o yaml | \
+    $SUDO_E $KUBECTL apply -f -
+$SUDO_E $KUBECTL label namespace "$NS" istio-injection=enabled --overwrite
 
 echo "waiting for istiod"
-$SUDO -E $KUBECTL -n istio-system rollout status deploy/istiod --timeout=300s || \
+$SUDO_E $KUBECTL -n istio-system rollout status deploy/istiod --timeout=300s || \
     echo "WARN: istiod rollout did not report ready in time"
 
 echo "=== istio install complete at $(date -Is) ==="
-$SUDO -E $KUBECTL -n istio-system get pods
+$SUDO_E $KUBECTL -n istio-system get pods

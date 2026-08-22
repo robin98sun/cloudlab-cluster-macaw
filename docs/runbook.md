@@ -61,8 +61,8 @@ make verify
 | C05 | cgroup v2 unified | wrong base image — Ubuntu 22.04 defaults to unified |
 | C06 | clocks synchronised | chrony did not start; check `bootstrap.log` |
 | C07 | Istio control plane | the install may still be running; see §4 |
-| C08 | sidecar injection | the namespace label is missing, or istiod is unhealthy |
-| C09 | Envoy dynamic modules | see §5 |
+| C08 | sidecar injection | the namespace label is missing, or istiod is unhealthy — see §5.1 |
+| C09 | Envoy dynamic modules | see §5.1 |
 | C10 | experiment LANs | a worker is missing an interface — check the manifest |
 
 `make verify-fast` skips C09, which pulls a container image and takes a
@@ -83,7 +83,23 @@ make istio
 It is idempotent. To bring up a bare cluster and install the mesh yourself,
 uncheck `install_istio` when instantiating.
 
-## 5. Envoy dynamic modules
+## 5. The injected proxy
+
+Modern Istio injects the proxy as a **native sidecar**: an initContainer with
+`restartPolicy: Always`, a Kubernetes 1.29+ feature, rather than as an
+ordinary container. Verified on Istio 1.31.0-rc.0, where a meshed pod carries
+`istio-init` and `istio-proxy` in `.spec.initContainers` and shows `2/2`
+ready.
+
+This matters when inspecting or extending the proxy. `kubectl get pod -o
+jsonpath='{.spec.containers[*].name}'` will not list it; check
+`.spec.initContainers` too. Native sidecars also start before the
+application's own containers and stop after them, so anything the proxy must
+establish is in place before the application serves traffic.
+
+C08 accepts either form and reports which one it found.
+
+## 5.1 Envoy dynamic modules
 
 Envoy can load native extensions as **dynamic modules** — compiled libraries
 loaded at startup, which unlike WebAssembly extensions may use system calls
@@ -101,7 +117,7 @@ Verified by inspecting the shipped Envoy binary:
 | 1.30.3 | 1.38.4-dev | no |
 | 1.31.0-rc.0 | 1.39.1-dev | yes |
 
-C09 performs this check against whatever version the cluster is running. To
+C09 performs this check against whatever version the cluster is running, and has been confirmed passing on a live Istio 1.31.0-rc.0 cluster. To
 run it standalone on any machine with `ctr` and network access:
 
 ```bash

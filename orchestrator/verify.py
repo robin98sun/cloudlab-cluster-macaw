@@ -12,7 +12,7 @@ Checks:
     C03 containerd NRI enabled on every node
     C04 BPF toolchain and kernel BTF present
     C05 cgroup v2 unified hierarchy
-    C06 clocks synchronised
+    C06 clocks synchronised (each node's own NTP offset)
     C07 Istio control plane healthy
     C08 sidecar injection produces a two-container pod
     C09 Envoy supports dynamic-module extensions
@@ -109,20 +109,30 @@ def c05_cgroup_v2(topo, ctl):
 
 
 def c06_clock(topo, ctl):
-    stamps = {}
+    """Read each node's own NTP offset.
+
+    Comparing wall clocks across sequential SSH calls measures SSH latency,
+    not skew -- on a healthy cluster that reading is hundreds of milliseconds
+    and tells you nothing. chrony already knows its offset; ask it.
+    """
+    offsets, unknown = {}, []
     for n in topo["nodes"]:
-        rc, out = sh(n, "date +%s.%N")
-        if rc == 0:
-            try:
-                stamps[n["name"]] = float(out.split()[0])
-            except (ValueError, IndexError):
-                pass
-    if len(stamps) < 2:
-        return False, "could not read clocks from two or more nodes"
-    spread = max(stamps.values()) - min(stamps.values())
-    # Generous: this bounds gross skew, not measurement-grade sync. SSH
-    # round-trip variance alone is tens of milliseconds.
-    return spread < 1.0, "spread %.3fs across %d nodes" % (spread, len(stamps))
+        rc, out = sh(n, "chronyc tracking 2>/dev/null | "
+                        "awk '/^System time/ {print $4}'")
+        try:
+            offsets[n["name"]] = float(out.split()[0])
+        except (ValueError, IndexError):
+            unknown.append(n["name"])
+    if not offsets:
+        return False, "chrony not reporting on any node (%s)" % ", ".join(unknown)
+    worst_node = max(offsets, key=lambda k: offsets[k])
+    worst = offsets[worst_node]
+    detail = "worst offset %.6fs (%s)" % (worst, worst_node)
+    if unknown:
+        detail += "; no reading from " + ", ".join(unknown)
+    # 50 ms bounds gross skew without being so tight that a node which has
+    # just started stepping its clock trips it.
+    return worst < 0.05 and not unknown, detail
 
 
 def c07_istio(topo, ctl):
@@ -136,28 +146,38 @@ def c07_istio(topo, ctl):
 
 
 def c08_injection(topo, ctl):
+    """A meshed namespace must produce a pod carrying istio-proxy.
+
+    Where the proxy lands depends on the Istio version. Modern Istio injects
+    it as a *native sidecar* -- an initContainer with restartPolicy: Always
+    (Kubernetes 1.29+) -- rather than as an ordinary container. Checking only
+    .spec.containers reports a false failure against those versions, so both
+    lists are examined and the form found is reported.
+    """
     name = "inject-probe-%d" % int(time.time())
-    manifest = (
-        "apiVersion: v1\\nkind: Pod\\nmetadata:\\n  name: %s\\n"
-        "spec:\\n  restartPolicy: Never\\n  containers:\\n"
-        "  - name: app\\n    image: registry.k8s.io/pause:3.9\\n" % name)
-    create = "printf '%s' | %s -n %s apply -f - >/dev/null 2>&1" % (
-        manifest, KUBECTL, NS)
+    create = ("%s -n %s run %s --image=registry.k8s.io/pause:3.9 "
+              "--restart=Never >/dev/null 2>&1" % (KUBECTL, NS, name))
     rc, out = sh(ctl, create)
     if rc != 0:
         return False, "could not create probe pod: %s" % out[:120]
     try:
-        containers = ""
+        regular = side = ""
         for _ in range(30):
-            rc, containers = sh(
-                ctl, "%s -n %s get pod %s -o "
-                     "jsonpath='{.spec.containers[*].name}'"
-                     % (KUBECTL, NS, name))
-            if "istio-proxy" in containers:
+            rc, regular = sh(ctl, "%s -n %s get pod %s -o "
+                                  "jsonpath='{.spec.containers[*].name}'"
+                             % (KUBECTL, NS, name))
+            rc, side = sh(ctl, "%s -n %s get pod %s -o "
+                               "jsonpath='{.spec.initContainers[*].name}'"
+                          % (KUBECTL, NS, name))
+            if "istio-proxy" in regular or "istio-proxy" in side:
                 break
             time.sleep(2)
-        ok = "istio-proxy" in containers
-        return ok, "containers: %s" % (containers or "none")
+        if "istio-proxy" in side:
+            return True, "injected as a native sidecar (initContainers: %s)" % side
+        if "istio-proxy" in regular:
+            return True, "injected as a regular container (%s)" % regular
+        return False, ("no istio-proxy; containers=[%s] initContainers=[%s]"
+                       % (regular or "-", side or "-"))
     finally:
         sh(ctl, "%s -n %s delete pod %s --ignore-not-found --wait=false "
                 ">/dev/null 2>&1" % (KUBECTL, NS, name))

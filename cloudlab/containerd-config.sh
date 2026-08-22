@@ -54,6 +54,17 @@ root = '$DATA_ROOT'
 [plugins.'$CRI_RUNTIME'.containerd.runtimes.runc.options]
   SystemdCgroup = true
 
+# Registry host configuration directory. The zero value is EMPTY -- the
+# /etc/containerd/certs.d path shown by "containerd config default" is
+# what the generator writes into a full config file, not a built-in
+# fallback. Without this line the CRI image service ignores certs.d
+# entirely and hosts.toml drop-ins (private-registry trust) never apply,
+# while a manual ctr --hosts-dir pull works -- a maximally confusing
+# split. NOTE: this block is written through an unquoted heredoc, so
+# backticks in comments would EXECUTE; keep them out.
+[plugins.'io.containerd.cri.v1.images'.registry]
+  config_path = '/etc/containerd/certs.d'
+
 [plugins.'io.containerd.nri.v1.nri']
   disable = false
   disable_connections = false

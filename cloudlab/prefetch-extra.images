@@ -1,0 +1,18 @@
+# Additional images for the bake-layer prefetch, one per line.
+# These are the rendered images of kube-prometheus-stack at the chart
+# version pinned in co-scheduling's monitoring/install-monitoring.sh
+# (PROM_CHART_VERSION). Regenerate after bumping that pin:
+#
+#   helm template prometheus prometheus-community/kube-prometheus-stack \
+#       --version <PIN> -n monitoring \
+#     | grep -E '^\s+image: ' | sed -E 's/^\s+image: "?([^"]+)"?/\1/' | sort -u
+#
+# then bump IMAGE_LAYER in bootstrap.sh and rebake.
+docker.io/grafana/grafana:13.2.0
+ghcr.io/jkroepke/kube-webhook-certgen:1.8.7
+quay.io/kiwigrid/k8s-sidecar:2.10.1
+quay.io/prometheus/alertmanager:v0.34.0
+quay.io/prometheus/node-exporter:v1.12.1-distroless
+quay.io/prometheus-operator/prometheus-operator:v0.93.1
+quay.io/prometheus/prometheus:v3.14.0-distroless
+registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0

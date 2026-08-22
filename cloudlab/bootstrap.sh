@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-IMAGE_LAYER=3          # bump when the bake layer's contents change, then rebake
+IMAGE_LAYER=4          # bump when the bake layer's contents change, then rebake
 
 # Kubernetes minor series. Pinned and held so a later apt upgrade cannot move
 # the cluster underneath a run.
@@ -99,6 +99,12 @@ else
     $SUDO apt-mark hold kubelet kubeadm kubectl >/dev/null
     kubeadm version -o short
 
+    # helm: install-monitoring.sh runs on this node and needs it.
+    if ! command -v helm >/dev/null 2>&1; then
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \
+            | $SUDO bash >/dev/null 2>&1 || echo "WARN: helm install failed"
+    fi
+
     # istioctl, pinned. Kept in the bake layer so a redeploy needs no download.
     if [ ! -x /usr/local/bin/istioctl ]; then
         ( cd /tmp && \
@@ -123,7 +129,8 @@ else
         echo "docker.io/calico/node:$CALICO_VERSION"; \
         echo "docker.io/calico/kube-controllers:$CALICO_VERSION"; \
         echo "docker.io/istio/pilot:$ISTIO_VERSION"; \
-        echo "docker.io/istio/proxyv2:$ISTIO_VERSION") | sort -u )"
+        echo "docker.io/istio/proxyv2:$ISTIO_VERSION"; \
+        grep -vE "^\s*(#|$)" "$REPO/cloudlab/prefetch-extra.images" 2>/dev/null) | sort -u )"
     # manifest.txt maps tarball -> image name; the boot layer reads it back.
     # Reconstructing the name from the filename is not reliable (underscores
     # are legal in image names), so it is recorded, not derived.

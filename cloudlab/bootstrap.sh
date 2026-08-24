@@ -280,14 +280,65 @@ fi
 # The control plane then has no route to half the cluster, and everything that
 # depends on the API server reaching a pod -- admission webhooks above all --
 # times out with an error that names none of this.
+# So the address must be pinned, and every node must pin to the same LAN.
 #
-# The default-route source address is the CloudLab control network, which
-# every node shares and which carries no measured traffic.
-NODE_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
-if [ -z "$NODE_IP" ]; then
-    echo "WARNING: could not determine the control-network address; kubelet will guess"
+# This used to pin to the default-route source address, on the reasoning that
+# the CloudLab control network is shared by every node "and carries no measured
+# traffic". The first half is true; the second is not. The node IP is exactly
+# what pod traffic follows -- Calico is pinned below to
+# IP_AUTODETECTION_METHOD=kubernetes-internal-ip -- so pinning there put ALL
+# measured traffic on the control interface. On c6420 that is a 1 Gb/s link
+# beside an idle 10 Gb/s experiment LAN: measured 846 Mbit/s against
+# 8885 Mbit/s, a 10.5x ceiling sitting directly upstream of the tail latency
+# these experiments evaluate.
+#
+# Pick by capability, never by interface name -- the hardware type is a profile
+# parameter and c6420 will not be the last one. Highest link speed among
+# physical, up, RFC1918-addressed interfaces wins; ties break on name so every
+# node applies an identical rule and lands on the same LAN, which is the
+# consistency property the original was protecting. Restricting to private
+# addresses is what separates an experiment LAN from the routable control
+# network on CloudLab.
+select_node_ip() {
+    best_if=""; best_ip=""; best_speed=-1
+    for path in /sys/class/net/*; do
+        cand_if=$(basename "$path")
+        # Physical devices only. Virtual interfaces -- docker0, cali*, veth,
+        # tunl, bridges -- have no device symlink. A property check rather than
+        # a name blocklist, so a virtual driver nobody has seen yet cannot slip
+        # through by failing to match a pattern.
+        [ -e "$path/device" ] || continue
+        [ "$(cat "$path/operstate" 2>/dev/null)" = "up" ] || continue
+        cand_ip=$(ip -4 -brief addr show "$cand_if" 2>/dev/null \
+                  | awk '{print $3}' | cut -d/ -f1 | head -1)
+        [ -n "$cand_ip" ] || continue
+        case "$cand_ip" in
+            10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) ;;
+            *) continue ;;
+        esac
+        speed=$(cat "$path/speed" 2>/dev/null || echo 0)
+        case "$speed" in ""|*[!0-9]*) speed=0 ;; esac
+        if [ "$speed" -gt "$best_speed" ] \
+           || { [ "$speed" -eq "$best_speed" ] && [ "$cand_if" \< "$best_if" ]; }; then
+            best_speed=$speed; best_if=$cand_if; best_ip=$cand_ip
+        fi
+    done
+    [ -n "$best_ip" ] || return 1
+    echo "$best_ip $best_if $best_speed"
+}
+NODE_IP=""
+if NODE_SEL="$(select_node_ip)"; then
+    NODE_IP="${NODE_SEL%% *}"
+    echo "node IP: $NODE_IP (${NODE_SEL#* } Mb/s, fastest private interface)"
 else
-    echo "node IP: $NODE_IP"
+    # No private interface at all: fall back to the previous behaviour rather
+    # than leaving kubelet to guess, which is the failure described above.
+    NODE_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
+    if [ -z "$NODE_IP" ]; then
+        echo "WARNING: no private interface and no default route; kubelet will guess"
+    else
+        echo "node IP: $NODE_IP (no private interface found; using the default route)"
+    fi
 fi
 # These go in /etc/default/kubelet, not a systemd drop-in. kubeadm's unit
 # reads that path with EnvironmentFile=, and systemd applies EnvironmentFile

@@ -61,25 +61,34 @@ than left as a trap.
 | `wk<j>` | meshed workloads and per-node agents | yes |
 | `st<j>` | cluster services kept off the measured workers | yes |
 | `ng<j>` | ingress / reverse proxy | yes |
+| `qs<j>` | request/query scheduling tier | yes |
 | `dp<j>` | drive load over ssh | **no, by design** |
 
 Dispatchers stay out of the cluster deliberately: a load generator that is
 also a schedulable node can end up hosting the workload it is measuring.
 
+Query-scheduler hosts exist for the same reason in reverse. The scheduling
+tier is not what these experiments measure, so it is given its own machines
+rather than being left to share the workers and have its cost attributed to
+them. Presets size it at about half the worker count — a starting point, not
+a measured requirement. Setting it to 0 does not disable the tier; it returns
+it to the workers.
+
 Presets (each adds `ctl1` on top):
 
-| Preset | Machines | wk | st | ng | dp |
-|---|---|---|---|---|---|
-| smoke | 2 | 1 | 0 | 0 | 0 |
-| medium | 12 | 5 | 3 | 2 | 1 |
-| full | 39 | 20 | 10 | 4 | 4 |
-| submission | 39 | 20 | 10 | 4 | 4 |
+| Preset | Machines | wk | st | ng | qs | dp |
+|---|---|---|---|---|---|---|
+| smoke | 3 | 1 | 0 | 0 | 1 | 0 |
+| medium | 15 | 5 | 3 | 2 | 3 | 1 |
+| full | 49 | 20 | 10 | 4 | 10 | 4 |
+| submission | 49 | 20 | 10 | 4 | 10 | 4 |
 
-A 39-node request is large — check availability before instantiating.
+A 49-node request is large — check availability before instantiating, and
+expect to wait or to reduce counts if the cluster is busy.
 
 Addresses, blocked by role so an address names its purpose:
 `ctl1` 10.10.1.10, `wk<j>` 10.10.1.(20+j), `st<j>` 10.10.1.(60+j),
-`ng<j>` 10.10.1.(80+j), `dp<j>` 10.10.1.(100+j).
+`ng<j>` 10.10.1.(80+j), `dp<j>` 10.10.1.(100+j), `qs<j>` 10.10.1.(120+j).
 
 ## License
 

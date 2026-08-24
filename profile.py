@@ -9,6 +9,8 @@ Physical hosts (one hardware type per comparison series, default c6420):
     wk<j>   worker hosts: meshed workloads and per-node agents
     st<j>   standby hosts: cluster services kept off the measured workers
     ng<j>   gateway hosts: ingress / reverse proxy
+    qs<j>   query-scheduler hosts: the request-scheduling tier, held off the
+            measured workers so its cost is never attributed to them
     dp<j>   dispatcher hosts: drive load over ssh; deliberately NOT joined
             to the cluster, so no workload pod can ever land on a machine
             that is generating the load
@@ -32,17 +34,23 @@ Every worker node is prepared with:
 
 Purposes are parameter bindings of this one generator, selected by `preset`:
 
-    preset      machines  wk  st  ng  dp  intent
-    smoke        2         1   0   0   0  plumbing verification
-    medium      12         5   3   2   1  multi-node behaviour
-    full        39        20  10   4   4  full-scale runs
-    submission  39        20  10   4   4  frozen bindings for reported
-                                          results; bind a portal profile to
-                                          a release TAG of this repo so it
-                                          can never drift
-    custom      --        --  --  --  --  the individual form fields apply
+    preset      machines  wk  st  ng  qs  dp  intent
+    smoke        3         1   0   0   1   0  plumbing verification
+    medium      15         5   3   2   3   1  multi-node behaviour
+    full        49        20  10   4  10   4  full-scale runs
+    submission  49        20  10   4  10   4  frozen bindings for reported
+                                              results; bind a portal profile
+                                              to a release TAG of this repo
+                                              so it can never drift
+    custom      --        --  --  --  --  --  the individual fields apply
 
-Every preset adds ctl1 on top of the counts shown, so machines = 1+wk+st+ng+dp.
+Every preset adds ctl1, so machines = 1 + wk + st + ng + qs + dp.
+
+Query-scheduler hosts are sized at roughly half the worker count. That ratio
+is a starting point, not a measured requirement: size it against the actual
+scheduling load and revise here. Setting it to 0 does not disable the tier --
+it puts the tier back on the workers, which is the contamination this role
+exists to avoid.
 
 When preset != custom, the preset's bindings OVERRIDE the individual form
 fields they name; fields a preset does not name (notably disk_image and
@@ -63,6 +71,7 @@ Address plan, blocked by role so a node's address names its purpose:
     ctl1    10.10.1.10
     wk<j>   10.10.1.(20+j)      st<j>   10.10.1.(60+j)
     ng<j>   10.10.1.(80+j)      dp<j>   10.10.1.(100+j)
+    qs<j>   10.10.1.(120+j)
 """
 import geni.portal as portal
 import geni.rspec.pg as pg
@@ -79,22 +88,23 @@ DEFAULT_ISTIO = "1.31.0-rc.0"
 
 PRESETS = {
     "smoke":      dict(num_wk_hosts=1,  num_st_hosts=0,  num_ng_hosts=0,
-                       num_dp_hosts=0),
+                       num_qs_hosts=1,  num_dp_hosts=0),
     "medium":     dict(num_wk_hosts=5,  num_st_hosts=3,  num_ng_hosts=2,
-                       num_dp_hosts=1),
+                       num_qs_hosts=3,  num_dp_hosts=1),
     "full":       dict(num_wk_hosts=20, num_st_hosts=10, num_ng_hosts=4,
-                       num_dp_hosts=4),
+                       num_qs_hosts=10, num_dp_hosts=4),
     "submission": dict(num_wk_hosts=20, num_st_hosts=10, num_ng_hosts=4,
-                       num_dp_hosts=4, hw_type="c6420", link_bw=0),
+                       num_qs_hosts=10, num_dp_hosts=4, hw_type="c6420",
+                       link_bw=0),
 }
 
 pc = portal.Context()
 
 pc.defineParameter(
     "preset", "Configuration preset", portal.ParameterType.STRING, "smoke",
-    legalValues=[("smoke", "smoke: 2 machines (1 worker)"),
-                 ("medium", "medium: 12 machines (5 wk, 3 st, 2 ng, 1 dp)"),
-                 ("full", "full: 39 machines (20 wk, 10 st, 4 ng, 4 dp)"),
+    legalValues=[("smoke", "smoke: 3 machines (1 wk, 1 qs)"),
+                 ("medium", "medium: 15 machines (5 wk, 3 st, 2 ng, 3 qs, 1 dp)"),
+                 ("full", "full: 49 machines (20 wk, 10 st, 4 ng, 10 qs, 4 dp)"),
                  ("submission", "submission: frozen full-scale bindings"),
                  ("custom", "custom: use the individual fields below")],
     longDescription="Anything other than 'custom' overrides the individual "
@@ -118,6 +128,15 @@ pc.defineParameter(
     portal.ParameterType.INTEGER, 0,
     longDescription="Ingress / reverse-proxy hosts fronting the meshed "
                     "services.")
+pc.defineParameter(
+    "num_qs_hosts", "Query-scheduler hosts (custom preset)",
+    portal.ParameterType.INTEGER, 0,
+    longDescription="Hosts for the request-scheduling tier. It is not the "
+                    "subject of the experiment, so it is kept off the "
+                    "workers rather than having its cost land in their "
+                    "numbers. Presets size it at about half the worker "
+                    "count as a starting point; measure and revise. 0 does "
+                    "not disable the tier, it returns it to the workers.")
 pc.defineParameter(
     "num_dp_hosts", "Dispatcher hosts (custom preset)",
     portal.ParameterType.INTEGER, 0,
@@ -173,8 +192,8 @@ pc.defineParameter(
 params = pc.bindParameters()
 
 CONFIG_FIELDS = ("num_wk_hosts", "num_st_hosts", "num_ng_hosts",
-                 "num_dp_hosts", "hw_type", "disk_image", "istio_version",
-                 "install_istio", "link_bw")
+                 "num_qs_hosts", "num_dp_hosts", "hw_type", "disk_image",
+                 "istio_version", "install_istio", "link_bw")
 cfg = {f: getattr(params, f) for f in CONFIG_FIELDS}
 if params.hw_type_custom.strip():
     cfg["hw_type"] = params.hw_type_custom.strip()
@@ -189,6 +208,7 @@ if cfg["num_wk_hosts"] < 1:
     pc.reportError(portal.ParameterError(
         "At least one worker host is required.", ["num_wk_hosts"]))
 for field, label in (("num_st_hosts", "Standby"), ("num_ng_hosts", "Gateway"),
+                     ("num_qs_hosts", "Query-scheduler"),
                      ("num_dp_hosts", "Dispatcher")):
     if cfg[field] < 0:
         pc.reportError(portal.ParameterError(
@@ -196,7 +216,8 @@ for field, label in (("num_st_hosts", "Standby"), ("num_ng_hosts", "Gateway"),
 # The address plan blocks each role into its own decade-ish range; overrun
 # would silently collide two roles on one address.
 for field, limit, base in (("num_wk_hosts", 39, 20), ("num_st_hosts", 19, 60),
-                           ("num_ng_hosts", 19, 80), ("num_dp_hosts", 19, 100)):
+                           ("num_ng_hosts", 19, 80), ("num_dp_hosts", 19, 100),
+                           ("num_qs_hosts", 40, 120)):
     if cfg[field] > limit:
         pc.reportError(portal.ParameterError(
             "At most %d hosts for this role: the address plan gives it "
@@ -237,11 +258,11 @@ def attach(node, lan, addr):
 # ctl1 carries the control plane AND the private container registry, so the
 # registry never competes for a measured worker.
 ctl = make_node("ctl1", "ctl",
-                " --wk-hosts %d --st-hosts %d --ng-hosts %d --dp-hosts %d"
-                " --istio-version %s%s"
+                " --wk-hosts %d --st-hosts %d --ng-hosts %d --qs-hosts %d"
+                " --dp-hosts %d --istio-version %s%s"
                 % (cfg["num_wk_hosts"], cfg["num_st_hosts"],
-                   cfg["num_ng_hosts"], cfg["num_dp_hosts"],
-                   cfg["istio_version"],
+                   cfg["num_ng_hosts"], cfg["num_qs_hosts"],
+                   cfg["num_dp_hosts"], cfg["istio_version"],
                    "" if cfg["install_istio"] else " --no-istio"))
 attach(ctl, client_lan, "10.10.1.10")
 
@@ -249,7 +270,8 @@ attach(ctl, client_lan, "10.10.1.10")
 for role, count, base in (("wk", cfg["num_wk_hosts"], 20),
                           ("st", cfg["num_st_hosts"], 60),
                           ("ng", cfg["num_ng_hosts"], 80),
-                          ("dp", cfg["num_dp_hosts"], 100)):
+                          ("dp", cfg["num_dp_hosts"], 100),
+                          ("qs", cfg["num_qs_hosts"], 120)):
     for j in range(1, count + 1):
         n = make_node("%s%d" % (role, j), role)
         attach(n, client_lan, "10.10.1.%d" % (base + j))

@@ -79,6 +79,12 @@ Dispatcher hosts (`dp<j>`) are prepared like any other node but are never
 joined to the cluster, so they will not appear in `kubectl get nodes`. That
 is deliberate — see README.
 
+Query-scheduler hosts (`qs<j>`) do join. They exist so the scheduling tier
+does not run on the workers whose performance is being measured. Placing the
+tier there is a scheduling decision the workload harness makes — this profile
+only guarantees the machines exist and are labelled by name. If nothing pins
+that tier to them, the machines sit idle and the contamination remains.
+
 Logs live on each node at `/local/testbed/logs/bootstrap.log`, and the mesh
 install at `/local/testbed/logs/istio.log`.
 

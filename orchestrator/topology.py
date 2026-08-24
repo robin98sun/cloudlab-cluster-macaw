@@ -12,7 +12,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 
-ROLE_OF = re.compile(r"^(ctl|wk|st|ng|dp|lg)\d*$")
+ROLE_OF = re.compile(r"^(ctl|wk|st|ng|qs|dp|lg)\d*$")
 # One experiment LAN; the default hardware type has a single experimental
 # interface. "lg" is retained only to read manifests from older allocations.
 LAN_BY_PREFIX = {"10.10.1.": "client"}
@@ -56,7 +56,8 @@ def parse_manifest(path):
 
 # role letter -> address base on the single experiment LAN. Must match the
 # address plan in profile.py; a mismatch here silently mislabels nodes.
-ROLE_BASE = (("wk", 20), ("st", 60), ("ng", 80), ("dp", 100))
+ROLE_BASE = (("wk", 20), ("st", 60), ("ng", 80), ("dp", 100),
+             ("qs", 120))
 
 
 def derive_nodes(user, domain, counts):
@@ -86,6 +87,7 @@ def main():
     d.add_argument("--wk", type=int, default=1)
     d.add_argument("--st", type=int, default=0)
     d.add_argument("--ng", type=int, default=0)
+    d.add_argument("--qs", type=int, default=0)
     d.add_argument("--dp", type=int, default=0)
 
     for q in (m, d):
@@ -95,7 +97,7 @@ def main():
     nodes = (parse_manifest(a.manifest) if a.cmd == "from-manifest"
              else derive_nodes(a.user, a.domain,
                                {"wk": a.wk, "st": a.st, "ng": a.ng,
-                                "dp": a.dp}))
+                                "qs": a.qs, "dp": a.dp}))
     topo = {"nodes": nodes, "lans": {"client": "10.10.1.0/24"}}
     with open(a.out, "w") as fh:
         json.dump(topo, fh, indent=2)

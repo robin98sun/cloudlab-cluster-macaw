@@ -1,4 +1,4 @@
-"""Verify an allocated testbed: cluster health, node capabilities, mesh.
+"""Verify an allocated testbed: cluster health, node capabilities, service mesh.
 
 Reads topology.json, runs checks over SSH, prints a PASS/FAIL table and
 writes a JSON result file. Every check is read-only except C08, which
@@ -248,20 +248,33 @@ def c09_dynamic_modules(topo, ctl):
 
 
 def c10_lans(topo, ctl):
-    """Each worker must hold an address on both experiment LANs."""
+    """Every non-control node must hold an experiment-LAN address ctl1 can reach.
+
+    This used to require workers to be dual-homed on a client and a mesh LAN.
+    The default hardware type has a single experimental interface, so that
+    check could only ever fail; there is now one experiment LAN and the
+    requirement is an address on it plus reachability.
+
+    Dispatchers are included: they are not cluster members, but they drive
+    load over that LAN and a silent routing problem there would look like a
+    workload result.
+    """
     bad = []
+    checked = 0
     for n in topo["nodes"]:
-        if n["role"] != "wk":
+        if n["role"] == "ctl":
             continue
         have = n.get("ifaces", {})
-        if not have.get("client") or not have.get("mesh"):
-            bad.append(n["name"])
+        addr = have.get("client")
+        if not addr:
+            bad.append("%s(no experiment-LAN address)" % n["name"])
             continue
-        rc, _ = sh(ctl, "ping -c1 -W2 %s >/dev/null 2>&1" % have["client"])
+        checked += 1
+        rc, _ = sh(ctl, "ping -c1 -W2 %s >/dev/null 2>&1" % addr)
         if rc != 0:
-            bad.append("%s(client unreachable)" % n["name"])
-    return not bad, "all workers dual-homed and reachable" if not bad \
-        else "problems: " + ", ".join(bad)
+            bad.append("%s(%s unreachable)" % (n["name"], addr))
+    return not bad, ("%d nodes reachable on the experiment LAN" % checked) \
+        if not bad else "problems: " + ", ".join(bad)
 
 
 CHECKS = [
@@ -275,7 +288,7 @@ CHECKS = [
     ("C07", "Istio control plane", c07_istio),
     ("C08", "sidecar injection", c08_injection),
     ("C09", "Envoy dynamic modules", c09_dynamic_modules),
-    ("C10", "experiment LANs", c10_lans),
+    ("C10", "experiment LAN reachability", c10_lans),
 ]
 
 

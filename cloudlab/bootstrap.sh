@@ -9,17 +9,30 @@
 #                         fast redeploy possible.
 #   Layer 2 (boot layer)  per-instantiation config: clock, storage,
 #                         containerd, kernel settings, cluster formation,
-#                         CNI, mesh. Runs every boot; idempotent and fast.
+#                         CNI, service mesh. Runs every boot; idempotent
+#                         and fast.
 #
-# Usage: bootstrap.sh <ctl|wk|lg> [--wk-hosts N --lg-hosts N
-#                                  --istio-version V --no-istio]  (ctl only)
+# Usage: bootstrap.sh <ctl|wk|st|ng|dp> [--wk-hosts N --st-hosts N
+#                                        --ng-hosts N --dp-hosts N
+#                                        --istio-version V --no-istio]  (ctl only)
+#
+# Roles: ctl control plane + private registry; wk worker; st standby;
+#        ng gateway; dp dispatcher. wk/st/ng join the cluster. dp does NOT --
+#        it drives load over ssh, and a load generator that is also
+#        schedulable can end up hosting the workload it is measuring.
 set -euo pipefail
 
-ROLE="${1:?usage: bootstrap.sh <ctl|wk|lg> [opts]}"; shift || true
-WK_HOSTS=1; LG_HOSTS=0; ISTIO_VERSION="1.31.0-rc.0"; INSTALL_ISTIO=1
+ROLE="${1:?usage: bootstrap.sh <ctl|wk|st|ng|dp> [opts]}"; shift || true
+WK_HOSTS=1; ST_HOSTS=0; NG_HOSTS=0; DP_HOSTS=0; LG_HOSTS=0
+ISTIO_VERSION="1.31.0-rc.0"; INSTALL_ISTIO=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --wk-hosts)      WK_HOSTS="$2";      shift 2 ;;
+        --st-hosts)      ST_HOSTS="$2";      shift 2 ;;
+        --ng-hosts)      NG_HOSTS="$2";      shift 2 ;;
+        --dp-hosts)      DP_HOSTS="$2";      shift 2 ;;
+        # Retained so an older portal profile pinned to a previous commit
+        # still instantiates instead of failing on an unknown argument.
         --lg-hosts)      LG_HOSTS="$2";      shift 2 ;;
         --istio-version) ISTIO_VERSION="$2"; shift 2 ;;
         --no-istio)      INSTALL_ISTIO=0;    shift   ;;
@@ -258,9 +271,9 @@ fi
 # Node IP and kubelet data directory.
 #
 # --node-ip matters more than it looks. CloudLab nodes are multi-homed, and
-# an unpinned kubelet picks whichever interface it enumerates first: on this
-# hardware some nodes land on the client LAN and others on the mesh LAN. The
-# control plane then has no route to half the cluster, and everything that
+# an unpinned kubelet picks whichever interface it enumerates first: it may
+# choose the experiment LAN on some nodes and the control network on others.
+# The control plane then has no route to half the cluster, and everything that
 # depends on the API server reaching a pod -- admission webhooks above all --
 # times out with an error that names none of this.
 #
@@ -385,7 +398,9 @@ case "$ROLE" in
             echo "WARN: Calico apply failed; retry with 'make cni'"
         fi
 
-        EXPECTED=$((1 + WK_HOSTS + LG_HOSTS))
+        # Dispatchers are deliberately absent from the cluster, so they are
+        # not counted here -- waiting for them would never finish.
+        EXPECTED=$((1 + WK_HOSTS + ST_HOSTS + NG_HOSTS + LG_HOSTS))
         echo "waiting for $EXPECTED Ready nodes"
         READY=0
         for _ in $(seq 1 120); do
@@ -405,7 +420,12 @@ case "$ROLE" in
             echo "Istio install skipped by profile parameter"
         fi
         ;;
-    wk|lg)
+    dp)
+        # Prepared exactly like any other node -- storage, containerd,
+        # kernel settings, tooling -- but never joined. See the header.
+        echo "dispatcher host: prepared, not joined to the cluster by design"
+        ;;
+    wk|st|ng|lg)
         if [ ! -f /etc/kubernetes/kubelet.conf ]; then
             # The API server may not be up yet; retry rather than fail the
             # startup service.

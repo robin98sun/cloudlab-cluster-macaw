@@ -51,14 +51,35 @@ hardware selection, the Istio version question, and what each check means.
 
 ## Layout
 
-| Role | Count | Networks | Purpose |
-|---|---|---|---|
-| `ctl1` | 1 | client | Kubernetes and Istio control plane, monitoring |
-| `wk<j>` | 1–6 | client + mesh | meshed workloads and per-node agents |
-| `lg<i>` | 0–n | client | optional dedicated load generators |
+One experiment LAN. The default hardware type (`c6420`) has a single 10G
+experimental interface, so an earlier two-LAN split has been removed rather
+than left as a trap.
 
-Addresses: `ctl1` 10.10.1.10, `lg<i>` 10.10.1.(10+i), `wk<j>` 10.10.1.(20+j)
-and 10.10.2.(20+j).
+| Role | Purpose | In the cluster? |
+|---|---|---|
+| `ctl1` | Kubernetes and Istio control plane, private container registry, monitoring | control plane |
+| `wk<j>` | meshed workloads and per-node agents | yes |
+| `st<j>` | cluster services kept off the measured workers | yes |
+| `ng<j>` | ingress / reverse proxy | yes |
+| `dp<j>` | drive load over ssh | **no, by design** |
+
+Dispatchers stay out of the cluster deliberately: a load generator that is
+also a schedulable node can end up hosting the workload it is measuring.
+
+Presets (each adds `ctl1` on top):
+
+| Preset | Machines | wk | st | ng | dp |
+|---|---|---|---|---|---|
+| smoke | 2 | 1 | 0 | 0 | 0 |
+| medium | 12 | 5 | 3 | 2 | 1 |
+| full | 39 | 20 | 10 | 4 | 4 |
+| submission | 39 | 20 | 10 | 4 | 4 |
+
+A 39-node request is large — check availability before instantiating.
+
+Addresses, blocked by role so an address names its purpose:
+`ctl1` 10.10.1.10, `wk<j>` 10.10.1.(20+j), `st<j>` 10.10.1.(60+j),
+`ng<j>` 10.10.1.(80+j), `dp<j>` 10.10.1.(100+j).
 
 ## License
 

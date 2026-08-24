@@ -12,8 +12,10 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 
-ROLE_OF = re.compile(r"^(ctl|wk|lg)\d*$")
-LAN_BY_PREFIX = {"10.10.1.": "client", "10.10.2.": "mesh"}
+ROLE_OF = re.compile(r"^(ctl|wk|st|ng|dp|lg)\d*$")
+# One experiment LAN; the default hardware type has a single experimental
+# interface. "lg" is retained only to read manifests from older allocations.
+LAN_BY_PREFIX = {"10.10.1.": "client"}
 
 
 def strip_ns(tag):
@@ -52,19 +54,21 @@ def parse_manifest(path):
     return nodes
 
 
-def derive_nodes(user, domain, lg, wk):
+# role letter -> address base on the single experiment LAN. Must match the
+# address plan in profile.py; a mismatch here silently mislabels nodes.
+ROLE_BASE = (("wk", 20), ("st", 60), ("ng", 80), ("dp", 100))
+
+
+def derive_nodes(user, domain, counts):
     def node(name, role, ifaces):
         return {"name": name, "role": role,
                 "control": "%s.%s" % (name, domain),
                 "user": user, "hardware": None, "ifaces": ifaces}
     nodes = [node("ctl1", "ctl", {"client": "10.10.1.10"})]
-    for i in range(1, lg + 1):
-        nodes.append(node("lg%d" % i, "lg",
-                          {"client": "10.10.1.%d" % (10 + i)}))
-    for j in range(1, wk + 1):
-        nodes.append(node("wk%d" % j, "wk",
-                          {"client": "10.10.1.%d" % (20 + j),
-                           "mesh": "10.10.2.%d" % (20 + j)}))
+    for role, base in ROLE_BASE:
+        for j in range(1, counts.get(role, 0) + 1):
+            nodes.append(node("%s%d" % (role, j), role,
+                              {"client": "10.10.1.%d" % (base + j)}))
     return nodes
 
 
@@ -79,17 +83,20 @@ def main():
     d.add_argument("--user", required=True)
     d.add_argument("--domain", required=True,
                    help="e.g. testbed-smoke.myproject.utah.cloudlab.us")
-    d.add_argument("--lg", type=int, default=0)
     d.add_argument("--wk", type=int, default=1)
+    d.add_argument("--st", type=int, default=0)
+    d.add_argument("--ng", type=int, default=0)
+    d.add_argument("--dp", type=int, default=0)
 
     for q in (m, d):
         q.add_argument("--out", default="topology.json")
 
     a = p.parse_args()
     nodes = (parse_manifest(a.manifest) if a.cmd == "from-manifest"
-             else derive_nodes(a.user, a.domain, a.lg, a.wk))
-    topo = {"nodes": nodes,
-            "lans": {"client": "10.10.1.0/24", "mesh": "10.10.2.0/24"}}
+             else derive_nodes(a.user, a.domain,
+                               {"wk": a.wk, "st": a.st, "ng": a.ng,
+                                "dp": a.dp}))
+    topo = {"nodes": nodes, "lans": {"client": "10.10.1.0/24"}}
     with open(a.out, "w") as fh:
         json.dump(topo, fh, indent=2)
     counts = {}

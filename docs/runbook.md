@@ -22,8 +22,14 @@ the fact.
 
 ### Hardware
 
-All listed types have at least two experimental interfaces, which worker
-hosts require. `c6525-25g` (Utah, 16 cores) is the most reliably free.
+The default is `c6420` (Clemson), which has a **single** 10G experimental
+interface. The profile therefore builds one experiment LAN; types with more
+interfaces simply leave the extras unused. There is no longer a
+two-interface requirement.
+
+Verify the core count of whichever type you choose. The workload harness
+pins cores per node itself, and that setting has to agree with the hardware
+or the run measures something other than what it claims.
 
 Use one hardware type across any series of runs you intend to compare.
 Results are comparable within a type, never across. Check C02 reports a
@@ -68,6 +74,10 @@ make verify
 
 `make verify-fast` skips C09, which pulls a container image and takes a
 couple of minutes.
+
+Dispatcher hosts (`dp<j>`) are prepared like any other node but are never
+joined to the cluster, so they will not appear in `kubectl get nodes`. That
+is deliberate — see README.
 
 Logs live on each node at `/local/testbed/logs/bootstrap.log`, and the mesh
 install at `/local/testbed/logs/istio.log`.

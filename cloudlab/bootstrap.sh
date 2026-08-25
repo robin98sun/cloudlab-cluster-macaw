@@ -223,11 +223,37 @@ setup_shared_storage() {
     return 0
 }
 
+# Subdirectories the deploy expects to already exist under $SHARED.
+#
+# On AWS these are created by the k8s deploy scripts; nothing in that path runs
+# on CloudLab, where the profile owns the disk. Without them
+# upload-ms-traces.sh scp's straight into $SHARED/ms-traces and fails with
+# "dest open: No such file or directory", after which the run waits
+# indefinitely for a trace replay that never started and reports
+# "0 / 1 MS dispatcher nodes finished".
+#
+# Created here rather than in a co-scheduling-side script because the profile
+# is what owns this filesystem: it mounts it, so it should hand it over in the
+# shape the deploy expects.
+seed_shared_storage_layout() {
+    $SUDO mkdir -p "$SHARED/ms-traces/tests" "$SHARED/profiling/results" \
+                   "$SHARED/k8s_cache" "$SHARED/nri-plugins"
+    # The deploy connects as ubuntu; that account may not exist yet on a fresh
+    # node, so fall back to world-writable rather than failing the bootstrap.
+    if id -u ubuntu >/dev/null 2>&1; then
+        $SUDO chown -R ubuntu:ubuntu "$SHARED/ms-traces" "$SHARED/profiling"
+    else
+        $SUDO chmod -R 0777 "$SHARED/ms-traces" "$SHARED/profiling"
+    fi
+    echo "shared-storage layout seeded under $SHARED"
+}
+
 if ! setup_shared_storage; then
     echo "WARNING: no shared storage; $SHARED stays on the root filesystem"
     echo "         (about 64 GB). Expect DiskPressure under image churn."
 fi
 $SUDO chmod 0777 "$SHARED"
+seed_shared_storage_layout
 $SUDO mkdir -p "$SHARED/k8s_cache/containerd" "$SHARED/k8s_cache/kubelet"
 
 # --- kernel prerequisites ---------------------------------------------------

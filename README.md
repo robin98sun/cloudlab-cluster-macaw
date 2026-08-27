@@ -27,10 +27,12 @@ workers and let the supporting roles be whatever is available:
 | `dp<j>` | load drivers | `hw_type_dp` | drive load over ssh; **not** joined to the cluster |
 | `rg<j>` | registry | `hw_type_rg` | private container registry; `0` keeps it on `ctl1` |
 
-Only the workers need to agree with each other: a per-node core pinning means
-different things on different machines, so the topology tooling warns when the
-**measured workers** span more than one type, and stays quiet about deliberate
-variety elsewhere.
+Homogeneity is required only of the **worker pool** — `wk*` and `st*`
+together. Both carry the per-node core split, and a standby can take measured
+work when a general worker is drained or the plan grows, so a core pinning has
+to mean the same thing on either. Control plane, gateways, schedulers, load
+drivers and the registry are free to differ; the topology tooling warns on a
+split inside the pool and stays quiet about deliberate variety elsewhere.
 
 Every node comes up with:
 

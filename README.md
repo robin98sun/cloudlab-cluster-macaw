@@ -12,6 +12,26 @@ The profile is neutral to whatever runs on top: namespaces, labels and paths
 use the generic name `testbed`, and nothing here depends on a particular
 workload or system under test.
 
+**Roles are sized and typed independently.** Each role takes the cluster-wide
+hardware type unless you give it one of its own, so a cluster can be
+deliberately heterogeneous — pin the machine you are characterising for the
+workers and let the supporting roles be whatever is available:
+
+| role | hosts | hardware override | notes |
+|---|---|---|---|
+| `ctl<j>` | control plane | `hw_type_ctl` | `ctl1` initialises; `ctl2..` join the same control plane (stacked etcd, so use an odd count). `ctl1` stays the endpoint. |
+| `wk<j>` | workers | `hw_type_wk` | hosts the measured workload |
+| `st<j>` | standby | `hw_type_st` | cluster services kept off the workers |
+| `ng<j>` | gateway | `hw_type_ng` | ingress / reverse proxy |
+| `qs<j>` | query schedulers | `hw_type_qs` | request-scheduling tier |
+| `dp<j>` | load drivers | `hw_type_dp` | drive load over ssh; **not** joined to the cluster |
+| `rg<j>` | registry | `hw_type_rg` | private container registry; `0` keeps it on `ctl1` |
+
+Only the workers need to agree with each other: a per-node core pinning means
+different things on different machines, so the topology tooling warns when the
+**measured workers** span more than one type, and stays quiet about deliberate
+variety elsewhere.
+
 Every node comes up with:
 
 - **Kubernetes** via kubeadm, one pinned minor series with the packages held;
@@ -21,7 +41,7 @@ Every node comes up with:
   configured through a drop-in rather than by editing generated config
 - **cgroup v2** unified hierarchy
 - a **BPF toolchain** and kernel BTF, for CPU and kernel telemetry
-- two isolated experiment LANs, with control-plane traffic kept off both
+- one experiment LAN at 10.10.1.0/24, with control-plane traffic kept off it
 
 ```
 profile.py                    CloudLab geni-lib profile (presets: smoke/medium/full/submission)

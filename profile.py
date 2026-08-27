@@ -3,9 +3,15 @@
 Project-neutral infrastructure. Namespaces, labels and paths use the generic
 name "testbed", so the same profile serves any system under test.
 
-Physical hosts (one hardware type per comparison series, default c6420):
+Physical hosts. Every role takes the cluster-wide hardware type unless it is
+given one of its own, so a cluster can be heterogeneous: pin the machine you
+are characterising for the workers and let the supporting roles be whatever is
+available.
 
-    ctl1    Kubernetes control plane + private container registry
+    ctl<j>  Kubernetes control plane. ctl1 initialises; ctl2.. join the same
+            control plane with stacked etcd, so the count should be odd.
+            ctl1 stays the endpoint, and also carries the private container
+            registry when no registry host is requested.
     wk<j>   worker hosts: meshed workloads and per-node agents
     st<j>   standby hosts: cluster services kept off the measured workers
     ng<j>   gateway hosts: ingress / reverse proxy
@@ -14,6 +20,9 @@ Physical hosts (one hardware type per comparison series, default c6420):
     dp<j>   dispatcher hosts: drive load over ssh; deliberately NOT joined
             to the cluster, so no workload pod can ever land on a machine
             that is generating the load
+    rg<j>   registry hosts: the private container registry, given its own
+            machine so image pulls at scale do not compete with the API
+            server. 0 of these keeps the registry on ctl1.
 
 ONE experiment LAN. The default hardware type (c6420) has a single 10G
 experimental interface, so the earlier client+mesh split is not physically
@@ -68,10 +77,10 @@ traffic ride CloudLab's control network, so the experiment LAN stays clean.
 Pod networking is Calico over 192.168.0.0/16.
 
 Address plan, blocked by role so a node's address names its purpose:
-    ctl1    10.10.1.10
-    wk<j>   10.10.1.(20+j)      st<j>   10.10.1.(60+j)
-    ng<j>   10.10.1.(80+j)      dp<j>   10.10.1.(100+j)
-    qs<j>   10.10.1.(120+j)
+    ctl<j>  10.10.1.(9+j)       wk<j>   10.10.1.(20+j)
+    st<j>   10.10.1.(60+j)      ng<j>   10.10.1.(80+j)
+    dp<j>   10.10.1.(100+j)     qs<j>   10.10.1.(120+j)
+    rg<j>   10.10.1.(160+j)
 """
 import geni.portal as portal
 import geni.rspec.pg as pg
@@ -111,6 +120,24 @@ pc.defineParameter(
                     "fields it defines. Presets are versioned with the "
                     "repository, so every run can name its configuration by "
                     "commit.")
+pc.defineParameter(
+    "num_ctl_hosts", "Control-plane hosts (custom preset)",
+    portal.ParameterType.INTEGER, 1,
+    longDescription="Kubernetes control-plane members. 1 is a single "
+                    "control plane. More than 1 brings up additional members "
+                    "that join the SAME control plane with stacked etcd, "
+                    "which needs an odd count to keep a quorum -- 1, 3 or 5. "
+                    "The endpoint stays ctl1, so losing ctl1 still costs you "
+                    "the cluster; this buys redundancy of the API server and "
+                    "etcd, not a floating VIP.")
+pc.defineParameter(
+    "num_rg_hosts", "Registry hosts (custom preset)",
+    portal.ParameterType.INTEGER, 0,
+    longDescription="Dedicated hosts for the private container registry. "
+                    "0 keeps the registry on ctl1, which is the historical "
+                    "behaviour and fine for small clusters. Give it its own "
+                    "host when image pulls at scale would otherwise compete "
+                    "with the API server.")
 pc.defineParameter(
     "num_wk_hosts", "Worker hosts (custom preset)",
     portal.ParameterType.INTEGER, 1,
@@ -167,6 +194,39 @@ pc.defineParameter(
     portal.ParameterType.STRING, "",
     longDescription="Escape hatch for new or unlisted node types. One "
                     "experimental interface is enough for this profile.")
+
+# Per-role hardware. Each is an override: leave it empty and the role takes
+# the cluster-wide type above. A mixed cluster is normal -- the measured
+# workers usually want the machine you are characterising, while gateways,
+# schedulers, the registry and the load drivers only need to be big enough
+# not to become the bottleneck. Give every role you override a type whose
+# core count you have checked: the workload harness pins cores per node and
+# must agree with the hardware it lands on.
+for _role, _label, _hint in (
+        ("ctl", "control-plane", "Runs the API server, etcd and the "
+                                 "scheduler. Modest is fine unless the "
+                                 "cluster is large."),
+        ("wk", "worker", "Hosts the measured workload. This is the machine "
+                         "the comparison is about, so it is usually the one "
+                         "worth pinning explicitly."),
+        ("st", "standby", "Cluster services kept off the measured workers."),
+        ("ng", "gateway", "Ingress / reverse proxy. Needs network, not cores."),
+        ("qs", "query-scheduler", "The request-scheduling tier."),
+        ("dp", "load-driver", "Generates load over ssh. Wants enough cores "
+                              "and network to saturate the workers without "
+                              "itself becoming the limit."),
+        ("rg", "registry", "Serves container images to the whole cluster. "
+                           "Disk and network matter more than cores."),
+):
+    pc.defineParameter(
+        "hw_type_%s" % _role,
+        "Hardware type: %s hosts (blank = cluster default)" % _label,
+        portal.ParameterType.STRING, "",
+        longDescription="%s Leave blank to use the cluster-wide hardware "
+                        "type. Availability differs per type, and a request "
+                        "mixing scarce types waits for the scarcest."
+                        % _hint,
+        advanced=True)
 pc.defineParameter(
     "disk_image", "Disk image URN", portal.ParameterType.STRING, GOLDEN_IMAGE,
     longDescription="Defaults to the golden image once one is pinned in the "
@@ -191,12 +251,19 @@ pc.defineParameter(
 
 params = pc.bindParameters()
 
-CONFIG_FIELDS = ("num_wk_hosts", "num_st_hosts", "num_ng_hosts",
-                 "num_qs_hosts", "num_dp_hosts", "hw_type", "disk_image",
+ROLE_LETTERS = ("ctl", "wk", "st", "ng", "qs", "dp", "rg")
+
+CONFIG_FIELDS = ("num_ctl_hosts", "num_wk_hosts", "num_st_hosts",
+                 "num_ng_hosts", "num_qs_hosts", "num_dp_hosts",
+                 "num_rg_hosts", "hw_type", "disk_image",
                  "istio_version", "install_istio", "link_bw")
 cfg = {f: getattr(params, f) for f in CONFIG_FIELDS}
 if params.hw_type_custom.strip():
     cfg["hw_type"] = params.hw_type_custom.strip()
+# Per-role overrides are resolved AFTER the preset is applied, so a preset can
+# still set the cluster-wide type and an override still wins over it.
+for _r in ROLE_LETTERS:
+    cfg["hw_type_%s" % _r] = getattr(params, "hw_type_%s" % _r, "").strip()
 if params.preset != "custom":
     if params.preset not in PRESETS:
         pc.reportError(portal.ParameterError(
@@ -207,17 +274,29 @@ if params.preset != "custom":
 if cfg["num_wk_hosts"] < 1:
     pc.reportError(portal.ParameterError(
         "At least one worker host is required.", ["num_wk_hosts"]))
+if cfg["num_ctl_hosts"] < 1:
+    pc.reportError(portal.ParameterError(
+        "At least one control-plane host is required.", ["num_ctl_hosts"]))
+elif cfg["num_ctl_hosts"] % 2 == 0:
+    # Stacked etcd needs an odd number to hold a quorum. Refusing here beats
+    # handing back a cluster that loses its API server when one node reboots.
+    pc.reportError(portal.ParameterError(
+        "Control-plane hosts must be odd (1, 3, 5): stacked etcd needs an "
+        "odd count to keep a quorum.", ["num_ctl_hosts"]))
 for field, label in (("num_st_hosts", "Standby"), ("num_ng_hosts", "Gateway"),
                      ("num_qs_hosts", "Query-scheduler"),
-                     ("num_dp_hosts", "Dispatcher")):
+                     ("num_dp_hosts", "Dispatcher"),
+                     ("num_rg_hosts", "Registry")):
     if cfg[field] < 0:
         pc.reportError(portal.ParameterError(
             "%s hosts cannot be negative." % label, [field]))
 # The address plan blocks each role into its own decade-ish range; overrun
 # would silently collide two roles on one address.
-for field, limit, base in (("num_wk_hosts", 39, 20), ("num_st_hosts", 19, 60),
+for field, limit, base in (("num_ctl_hosts", 10, 9),
+                           ("num_wk_hosts", 39, 20), ("num_st_hosts", 19, 60),
                            ("num_ng_hosts", 19, 80), ("num_dp_hosts", 19, 100),
-                           ("num_qs_hosts", 40, 120)):
+                           ("num_qs_hosts", 40, 120),
+                           ("num_rg_hosts", 19, 160)):
     if cfg[field] > limit:
         pc.reportError(portal.ParameterError(
             "At most %d hosts for this role: the address plan gives it "
@@ -237,10 +316,16 @@ if cfg["link_bw"] > 0:
     client_lan.bandwidth = cfg["link_bw"]
 
 
+def hw_for(role):
+    """Hardware type for a role: its own override, else the cluster default."""
+    return cfg.get("hw_type_%s" % role) or cfg["hw_type"]
+
+
 def make_node(name, role, extra_args=""):
     node = request.RawPC(name)
-    if cfg["hw_type"]:
-        node.hardware_type = cfg["hw_type"]
+    hw = hw_for(role)
+    if hw:
+        node.hardware_type = hw
     node.disk_image = cfg["disk_image"]
     node.addService(pg.Execute(
         shell="bash",
@@ -255,23 +340,34 @@ def attach(node, lan, addr):
     lan.addInterface(iface)
 
 
-# ctl1 carries the control plane AND the private container registry, so the
-# registry never competes for a measured worker.
+# ctl1 initialises the cluster. It also carries the private container
+# registry unless a registry host was asked for, so the registry never
+# competes with a measured worker either way.
 ctl = make_node("ctl1", "ctl",
-                " --wk-hosts %d --st-hosts %d --ng-hosts %d --qs-hosts %d"
-                " --dp-hosts %d --istio-version %s%s"
-                % (cfg["num_wk_hosts"], cfg["num_st_hosts"],
-                   cfg["num_ng_hosts"], cfg["num_qs_hosts"],
-                   cfg["num_dp_hosts"], cfg["istio_version"],
+                " --ctl-hosts %d --wk-hosts %d --st-hosts %d --ng-hosts %d"
+                " --qs-hosts %d --dp-hosts %d --rg-hosts %d"
+                " --istio-version %s%s"
+                % (cfg["num_ctl_hosts"], cfg["num_wk_hosts"],
+                   cfg["num_st_hosts"], cfg["num_ng_hosts"],
+                   cfg["num_qs_hosts"], cfg["num_dp_hosts"],
+                   cfg["num_rg_hosts"], cfg["istio_version"],
                    "" if cfg["install_istio"] else " --no-istio"))
 attach(ctl, client_lan, "10.10.1.10")
+
+# Additional control-plane members. They join the control plane ctl1 created,
+# using the certificate key it uploaded, so this is one HA control plane and
+# not several clusters. ctl1 stays the endpoint.
+for j in range(2, cfg["num_ctl_hosts"] + 1):
+    n = make_node("ctl%d" % j, "ctl")
+    attach(n, client_lan, "10.10.1.%d" % (9 + j))
 
 # role letter, count, address base
 for role, count, base in (("wk", cfg["num_wk_hosts"], 20),
                           ("st", cfg["num_st_hosts"], 60),
                           ("ng", cfg["num_ng_hosts"], 80),
                           ("dp", cfg["num_dp_hosts"], 100),
-                          ("qs", cfg["num_qs_hosts"], 120)):
+                          ("qs", cfg["num_qs_hosts"], 120),
+                          ("rg", cfg["num_rg_hosts"], 160)):
     for j in range(1, count + 1):
         n = make_node("%s%d" % (role, j), role)
         attach(n, client_lan, "10.10.1.%d" % (base + j))

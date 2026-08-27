@@ -17,16 +17,24 @@
 #                                           --dp-hosts N
 #                                           --istio-version V --no-istio]  (ctl only)
 #
-# Roles: ctl control plane + private registry; wk worker; st standby;
-#        ng gateway; qs query scheduler; dp dispatcher.
+# Roles: ctl control plane; wk worker; st standby; ng gateway;
+#        qs query scheduler; dp dispatcher; rg registry.
 #
-# wk/st/ng/qs join the cluster. dp does NOT -- it drives load over ssh, and a
-# load generator that is also schedulable can end up hosting the workload it
+# ctl1 runs kubeadm init. ctl2.. join the SAME control plane with the
+# certificate key ctl1 uploaded, giving stacked etcd -- so the count wants to
+# be odd. ctl1 remains the endpoint.
+#
+# wk/st/ng/qs/rg join the cluster. dp does NOT -- it drives load over ssh, and
+# a load generator that is also schedulable can end up hosting the workload it
 # is measuring.
+#
+# The private registry runs on rg1 when a registry host was requested, and on
+# ctl1 otherwise.
 set -euo pipefail
 
-ROLE="${1:?usage: bootstrap.sh <ctl|wk|st|ng|qs|dp> [opts]}"; shift || true
-WK_HOSTS=1; ST_HOSTS=0; NG_HOSTS=0; QS_HOSTS=0; DP_HOSTS=0; LG_HOSTS=0
+ROLE="${1:?usage: bootstrap.sh <ctl|wk|st|ng|qs|dp|rg> [opts]}"; shift || true
+CTL_HOSTS=1; WK_HOSTS=1; ST_HOSTS=0; NG_HOSTS=0; QS_HOSTS=0; DP_HOSTS=0
+RG_HOSTS=0; LG_HOSTS=0
 ISTIO_VERSION="1.31.0-rc.0"; INSTALL_ISTIO=1
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -38,6 +46,8 @@ while [ $# -gt 0 ]; do
         # Retained so an older portal profile pinned to a previous commit
         # still instantiates instead of failing on an unknown argument.
         --lg-hosts)      LG_HOSTS="$2";      shift 2 ;;
+        --ctl-hosts)     CTL_HOSTS="$2";     shift 2 ;;
+        --rg-hosts)      RG_HOSTS="$2";      shift 2 ;;
         --istio-version) ISTIO_VERSION="$2"; shift 2 ;;
         --no-istio)      INSTALL_ISTIO=0;    shift   ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -443,6 +453,43 @@ $SUDO systemctl enable kubelet >/dev/null 2>&1 || true
 
 case "$ROLE" in
     ctl)
+        # Only ctl1 initialises. Any other ctl host joins the control plane
+        # ctl1 created, with the certificate key ctl1 uploaded -- otherwise
+        # each would kubeadm-init its own cluster and the profile would hand
+        # back N clusters of one node wearing the same LAN.
+        if [ "$(hostname -s)" != "ctl1" ]; then
+            if [ -f /etc/kubernetes/kubelet.conf ]; then
+                echo "control-plane member already joined"
+            else
+                joined=0
+                for attempt in $(seq 1 60); do
+                    if $SUDO kubeadm join "$ENDPOINT" \
+                            --token "$KUBE_TOKEN" \
+                            --discovery-token-unsafe-skip-ca-verification \
+                            --control-plane --certificate-key "$CERT_KEY" \
+                            --node-name "$(hostname -s)" \
+                            --ignore-preflight-errors=NumCPU,Mem
+                    then joined=1; break; fi
+                    echo "control-plane join attempt $attempt failed; retrying in 10s"
+                    $SUDO kubeadm reset -f >/dev/null 2>&1 || true
+                    sleep 10
+                done
+                [ "$joined" -eq 1 ] || {
+                    echo "ERROR: could not join the control plane"; exit 1; }
+            fi
+            # kubectl for the local accounts, same as ctl1.
+            $SUDO chmod 0644 /etc/kubernetes/admin.conf 2>/dev/null || true
+            for u in "$(logname 2>/dev/null || echo root)" ubuntu; do
+                h=$(getent passwd "$u" | cut -d: -f6 || true)
+                [ -n "$h" ] && [ -d "$h" ] || continue
+                $SUDO mkdir -p "$h/.kube"
+                $SUDO cp -f /etc/kubernetes/admin.conf "$h/.kube/config" 2>/dev/null || true
+                $SUDO chown -R "$u" "$h/.kube" 2>/dev/null || true
+            done
+            echo "control-plane member ready: $(hostname -s)"
+            exit 0
+        fi
+
         if [ ! -f /etc/kubernetes/admin.conf ]; then
             $SUDO kubeadm init \
                 --control-plane-endpoint "$ENDPOINT" \
@@ -506,7 +553,7 @@ case "$ROLE" in
         # kernel settings, tooling -- but never joined. See the header.
         echo "dispatcher host: prepared, not joined to the cluster by design"
         ;;
-    wk|st|ng|qs|lg)
+    wk|st|ng|qs|rg|lg)
         if [ ! -f /etc/kubernetes/kubelet.conf ]; then
             # The API server may not be up yet; retry rather than fail the
             # startup service.

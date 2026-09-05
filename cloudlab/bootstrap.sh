@@ -61,6 +61,7 @@ IMAGE_LAYER=4          # bump when the bake layer's contents change, then rebake
 K8S_SERIES="${K8S_SERIES:-v1.30}"
 CALICO_VERSION="${CALICO_VERSION:-v3.28.0}"
 POD_CIDR="${POD_CIDR:-192.168.0.0/16}"
+MAX_PODS="${MAX_PODS:-256}"
 
 # Fixed bootstrap token and CA key: every node forms the cluster without any
 # file distribution or coordination. A private testbed on an isolated
@@ -376,13 +377,19 @@ else
         echo "node IP: $NODE_IP (no private interface found; using the default route)"
     fi
 fi
+# --max-pods raises kubelet's default ceiling of 110. On the larger hardware
+# types a node has enough CPU and memory to run several hundred pods, and the
+# default cap, not the hardware, is what limits pod density. Calico's IPAM
+# borrows additional blocks out of the /16 POD_CIDR as a node fills, so no
+# address-plan change is needed to go with it.
+#
 # These go in /etc/default/kubelet, not a systemd drop-in. kubeadm's unit
 # reads that path with EnvironmentFile=, and systemd applies EnvironmentFile
 # after every Environment= setting regardless of drop-in order -- so a
 # drop-in is silently overridden by the empty KUBELET_EXTRA_ARGS the package
 # ships there, with no error anywhere.
 $SUDO tee /etc/default/kubelet >/dev/null <<KUBELET
-KUBELET_EXTRA_ARGS=--root-dir=$SHARED/k8s_cache/kubelet${NODE_IP:+ --node-ip=$NODE_IP}
+KUBELET_EXTRA_ARGS=--root-dir=$SHARED/k8s_cache/kubelet --max-pods=$MAX_PODS${NODE_IP:+ --node-ip=$NODE_IP}
 KUBELET
 $SUDO rm -f /etc/systemd/system/kubelet.service.d/20-root-dir.conf \
             /etc/systemd/system/kubelet.service.d/20-testbed.conf

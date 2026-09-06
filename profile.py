@@ -24,11 +24,13 @@ available.
             machine so image pulls at scale do not compete with the API
             server. 0 of these keeps the registry on ctl1.
 
-ONE experiment LAN. The default hardware type (c6420) has a single 10G
-experimental interface, so the earlier client+mesh split is not physically
-possible and has been removed rather than left as a trap. Reintroducing a
+ONE experiment LAN. There is no default hardware type -- hw_type is blank
+unless you pin one -- and the profile assumes only that every node has a
+single usable experimental interface, which is the floor across the types
+we use. The earlier client+mesh split is not physically possible on such a
+type and has been removed rather than left as a trap. Reintroducing a
 second LAN requires hardware with a second experimental interface AND a
-matching change here; do not add one without checking the type.
+matching change here; do not add one without checking the type you pinned.
 
 Every worker node is prepared with:
 
@@ -110,16 +112,17 @@ PRESETS = {
 pc = portal.Context()
 
 pc.defineParameter(
-    "preset", "Configuration preset", portal.ParameterType.STRING, "smoke",
-    legalValues=[("smoke", "smoke: 3 machines (1 wk, 1 qs)"),
-                 ("medium", "medium: 15 machines (5 wk, 3 st, 2 ng, 3 qs, 1 dp)"),
-                 ("full", "full: 49 machines (20 wk, 10 st, 4 ng, 10 qs, 4 dp)"),
-                 ("submission", "submission: frozen full-scale bindings"),
-                 ("custom", "custom: use the individual fields below")],
-    longDescription="Anything other than 'custom' overrides the individual "
-                    "fields it defines. Presets are versioned with the "
-                    "repository, so every run can name its configuration by "
-                    "commit.")
+    "preset", "Configuration preset", portal.ParameterType.STRING, "custom",
+    longDescription="Free text, and 'custom' by default: every num_* field "
+                    "below stays in force, which is how a daily testbed is "
+                    "sized. Naming a preset instead -- smoke, medium, full, "
+                    "submission -- OVERRIDES the individual fields that "
+                    "preset defines; read PRESETS in the source for exactly "
+                    "what each one binds. Note that no preset meets the "
+                    "daily Macaw role floors: medium is one dp short. "
+                    "Presets are versioned with the repository, so a run can "
+                    "still name its configuration by commit. An unknown name "
+                    "is rejected at parameterize time, not at boot.")
 pc.defineParameter(
     "num_ctl_hosts", "Control-plane hosts (custom preset)",
     portal.ParameterType.INTEGER, 1,
@@ -172,23 +175,27 @@ pc.defineParameter(
                     "is also a schedulable node can end up hosting the very "
                     "workload it is measuring. 0 drives load from ctl1.")
 pc.defineParameter(
-    "hw_type", "Hardware type", portal.ParameterType.STRING, "c6420",
-    legalValues=[
-        ("c6420", "c6420 (Clemson): one 10G experimental interface"),
-        ("c6525-25g", "c6525-25g (Utah): 16c/128GB, 2x25G expt"),
-        ("c6620", "c6620 (Utah): 28c/128GB NVMe, 2 expt -- often reserved"),
-        ("d6515", "d6515 (Utah): 32c/128GB, 3 expt ifaces"),
-        ("d7615", "d7615 (Utah): 32c/192GB NVMe, 3 expt -- only 6 exist"),
-        ("c6525-100g", "c6525-100g (Utah): 24c/128GB, 2x100G expt"),
-    ],
-    longDescription="One homogeneous type per comparison series. This "
-                    "profile builds a SINGLE experiment LAN, so one "
-                    "experimental interface is sufficient and types with "
-                    "more simply leave the extras unused. Availability "
-                    "shifts; a large request may need to wait. Verify the "
-                    "core count of whichever type you pick -- the workload "
-                    "harness pins cores per node itself and must agree with "
-                    "the hardware.")
+    "hw_type", "Hardware type (blank = let the cluster choose)",
+    portal.ParameterType.STRING, "",
+    longDescription="Free text and deliberately EMPTY by default -- there is "
+                    "no default hardware type, because any type this profile "
+                    "picked for you would sooner or later be one that is out "
+                    "of stock. Blank leaves the choice to the mapper, which "
+                    "is the right setting when the run does not care. Name a "
+                    "type to pin it, and check resinfo first: every host must "
+                    "land in ONE cluster, and a request that cannot be fully "
+                    "mapped fails entirely. One homogeneous type per "
+                    "comparison series; a daily testbed may mix freely via "
+                    "the per-role fields. This profile builds a SINGLE "
+                    "experiment LAN, so one experimental interface is enough "
+                    "and types with more leave the extras unused. Verify the "
+                    "core count of whatever you pin -- the workload harness "
+                    "pins cores per node itself and must agree with the "
+                    "hardware. Types we have used: c6420 (Clemson) one 10G "
+                    "expt iface; c6525-25g (Utah) 16c/128GB 2x25G; c6620 "
+                    "(Utah) 28c/128GB NVMe, often reserved; d6515 (Utah) "
+                    "32c/128GB 3 expt; d7615 (Utah) 32c/192GB NVMe, only 6 "
+                    "exist; c6525-100g (Utah) 24c/128GB 2x100G.")
 pc.defineParameter(
     "hw_type_custom", "Custom hardware type (overrides the list)",
     portal.ParameterType.STRING, "",

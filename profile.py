@@ -255,6 +255,23 @@ pc.defineParameter(
     portal.ParameterType.INTEGER, 0,
     longDescription="0 leaves the link at line rate. Shape it only to model "
                     "a constrained network deliberately.")
+pc.defineParameter(
+    "lan_best_effort", "Best-effort experiment LAN (mixed hardware only)",
+    portal.ParameterType.BOOLEAN, False,
+    advanced=True,
+    longDescription="Leave this OFF for anything that produces a number. "
+                    "Emulab refuses to build one flat LAN across hardware "
+                    "types with different interface speeds -- measured on "
+                    "robin98-315025, 2026-09-08, which mapped 11x d430 + 3x "
+                    "d710, reached ready on every node, and then failed with "
+                    "'SliverStart: Failed to set up experimental networks'. "
+                    "d710 is 1Gb, d430 has 10Gb. This flag drops the "
+                    "guarantee so such a LAN can be built at all, which is "
+                    "what makes 'add a few nodes of another type to reach the "
+                    "count' possible when the preferred type is short. It is "
+                    "OFF by default because a best-effort LAN spanning mixed "
+                    "NICs is not the network the other runs were measured on: "
+                    "it buys a testbed to work on, never a comparable one.")
 
 params = pc.bindParameters()
 
@@ -263,7 +280,8 @@ ROLE_LETTERS = ("ctl", "wk", "st", "ng", "qs", "dp", "rg")
 CONFIG_FIELDS = ("num_ctl_hosts", "num_wk_hosts", "num_st_hosts",
                  "num_ng_hosts", "num_qs_hosts", "num_dp_hosts",
                  "num_rg_hosts", "hw_type", "disk_image",
-                 "istio_version", "install_istio", "link_bw")
+                 "istio_version", "install_istio", "link_bw",
+                 "lan_best_effort")
 cfg = {f: getattr(params, f) for f in CONFIG_FIELDS}
 if params.hw_type_custom.strip():
     cfg["hw_type"] = params.hw_type_custom.strip()
@@ -321,6 +339,10 @@ request = pc.makeRequestRSpec()
 client_lan = request.LAN("client")
 if cfg["link_bw"] > 0:
     client_lan.bandwidth = cfg["link_bw"]
+# Only when explicitly asked for. See the parameter's description: this makes a
+# mixed-hardware LAN buildable and makes it incomparable at the same time.
+if cfg["lan_best_effort"]:
+    client_lan.best_effort = True
 
 
 def hw_for(role):

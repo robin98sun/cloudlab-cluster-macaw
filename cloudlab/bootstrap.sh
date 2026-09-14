@@ -32,8 +32,8 @@
 # ctl1 otherwise.
 set -euo pipefail
 
-ROLE="${1:?usage: bootstrap.sh <ctl|wk|st|ng|qs|dp|rg> [opts]}"; shift || true
-CTL_HOSTS=1; WK_HOSTS=1; ST_HOSTS=0; NG_HOSTS=0; QS_HOSTS=0; DP_HOSTS=0
+ROLE="${1:?usage: bootstrap.sh <ctl|wk|st|ng|qs|dp|rg|cm> [opts]}"; shift || true
+CTL_HOSTS=1; WK_HOSTS=1; ST_HOSTS=0; NG_HOSTS=0; QS_HOSTS=0; DP_HOSTS=0; CM_HOSTS=0
 RG_HOSTS=0; LG_HOSTS=0
 ISTIO_VERSION="1.31.0-rc.0"; INSTALL_ISTIO=1
 while [ $# -gt 0 ]; do
@@ -48,6 +48,9 @@ while [ $# -gt 0 ]; do
         --lg-hosts)      LG_HOSTS="$2";      shift 2 ;;
         --ctl-hosts)     CTL_HOSTS="$2";     shift 2 ;;
         --rg-hosts)      RG_HOSTS="$2";      shift 2 ;;
+        # Custom hosts absorbed one at a time. ctl1 needs the
+        # count or its readiness wait finishes before they join.
+        --cm-hosts)      CM_HOSTS="$2";      shift 2 ;;
         --istio-version) ISTIO_VERSION="$2"; shift 2 ;;
         --no-istio)      INSTALL_ISTIO=0;    shift   ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -535,7 +538,7 @@ case "$ROLE" in
 
         # Dispatchers are deliberately absent from the cluster, so they are
         # not counted here -- waiting for them would never finish.
-        EXPECTED=$((1 + WK_HOSTS + ST_HOSTS + NG_HOSTS + QS_HOSTS + LG_HOSTS))
+        EXPECTED=$((1 + WK_HOSTS + ST_HOSTS + NG_HOSTS + QS_HOSTS + LG_HOSTS + CM_HOSTS))
         echo "waiting for $EXPECTED Ready nodes"
         READY=0
         for _ in $(seq 1 120); do
@@ -560,7 +563,7 @@ case "$ROLE" in
         # kernel settings, tooling -- but never joined. See the header.
         echo "dispatcher host: prepared, not joined to the cluster by design"
         ;;
-    wk|st|ng|qs|rg|lg)
+    wk|st|ng|qs|rg|lg|cm)
         if [ ! -f /etc/kubernetes/kubelet.conf ]; then
             # The API server may not be up yet; retry rather than fail the
             # startup service.

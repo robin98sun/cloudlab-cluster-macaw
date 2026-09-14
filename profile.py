@@ -234,6 +234,31 @@ for _role, _label, _hint in (
                         "mixing scarce types waits for the scarcest."
                         % _hint,
         advanced=True)
+# Ten CUSTOM HOST SLOTS. Each is one machine, requested only when its
+# hardware type is filled in, so a RUNNING experiment can absorb whatever
+# the cluster happens to have free -- one isolated idle host at a time --
+# without disturbing the nodes it already holds. Fill cm1, Modify; later
+# fill cm2, Modify again. The portal adds the new node and leaves the
+# existing mapping alone.
+#
+# Deliberately UNASSIGNED to a role. A machine taken because it was free is
+# not yet known to be a worker or a gateway; it joins the cluster labelled
+# testbed/role=cm-host and is given a job afterwards. That is why these are
+# ten separate fields rather than a count plus one type: the slots are
+# meant to hold DIFFERENT types, filled at different times, as
+# availability appears.
+for _m in range(1, 11):
+    pc.defineParameter(
+        "cm%d_hw_type" % _m,
+        "Custom host cm%d -- hardware type (empty = not requested)" % _m,
+        portal.ParameterType.STRING, "",
+        longDescription="One extra machine of this CloudLab type, named "
+                        "cm%d, address 10.10.1.%d. Empty leaves the slot "
+                        "unused. It joins the Kubernetes cluster like a "
+                        "worker but carries no role of its own until it is "
+                        "given one."
+                        % (_m, 180 + _m),
+        advanced=True)
 pc.defineParameter(
     "disk_image", "Disk image URN", portal.ParameterType.STRING, GOLDEN_IMAGE,
     longDescription="Defaults to the golden image once one is pinned in the "
@@ -289,6 +314,12 @@ if params.hw_type_custom.strip():
 # still set the cluster-wide type and an override still wins over it.
 for _r in ROLE_LETTERS:
     cfg["hw_type_%s" % _r] = getattr(params, "hw_type_%s" % _r, "").strip()
+# The slots actually filled, in slot order. A gap is not an error: leaving
+# cm2 empty and filling cm3 is what happens when a type stops being
+# available between one Modify and the next.
+cfg["cm_hosts"] = [(_m, getattr(params, "cm%d_hw_type" % _m, "").strip())
+                   for _m in range(1, 11)
+                   if getattr(params, "cm%d_hw_type" % _m, "").strip()]
 if params.preset != "custom":
     if params.preset not in PRESETS:
         pc.reportError(portal.ParameterError(
@@ -350,9 +381,12 @@ def hw_for(role):
     return cfg.get("hw_type_%s" % role) or cfg["hw_type"]
 
 
-def make_node(name, role, extra_args=""):
+def make_node(name, role, extra_args="", hw=None):
     node = request.RawPC(name)
-    hw = hw_for(role)
+    # A custom host names its OWN type -- each slot is filled with whatever
+    # was free at the time, so there is no per-role type to look up.
+    if hw is None:
+        hw = hw_for(role)
     if hw:
         node.hardware_type = hw
     node.disk_image = cfg["disk_image"]
@@ -375,11 +409,13 @@ def attach(node, lan, addr):
 ctl = make_node("ctl1", "ctl",
                 " --ctl-hosts %d --wk-hosts %d --st-hosts %d --ng-hosts %d"
                 " --qs-hosts %d --dp-hosts %d --rg-hosts %d"
+                " --cm-hosts %d"
                 " --istio-version %s%s"
                 % (cfg["num_ctl_hosts"], cfg["num_wk_hosts"],
                    cfg["num_st_hosts"], cfg["num_ng_hosts"],
                    cfg["num_qs_hosts"], cfg["num_dp_hosts"],
-                   cfg["num_rg_hosts"], cfg["istio_version"],
+                   cfg["num_rg_hosts"], len(cfg["cm_hosts"]),
+                   cfg["istio_version"],
                    "" if cfg["install_istio"] else " --no-istio"))
 attach(ctl, client_lan, "10.10.1.10")
 
@@ -400,5 +436,13 @@ for role, count, base in (("wk", cfg["num_wk_hosts"], 20),
     for j in range(1, count + 1):
         n = make_node("%s%d" % (role, j), role)
         attach(n, client_lan, "10.10.1.%d" % (base + j))
+
+# Custom hosts last, and addressed by SLOT rather than by fill order: cm3
+# is always 10.10.1.183 whether or not cm2 was ever requested. An absorbed
+# host that changed address because another was added later would
+# invalidate every config that already named it.
+for m, cm_hw in cfg["cm_hosts"]:
+    n = make_node("cm%d" % m, "cm", hw=cm_hw)
+    attach(n, client_lan, "10.10.1.%d" % (180 + m))
 
 pc.printRequestRSpec(request)
